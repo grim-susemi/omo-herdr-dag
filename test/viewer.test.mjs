@@ -438,8 +438,10 @@ test('real PTY follow reveals graph work, retains parallel targets, hands off an
   await writeJson(file, state);
   const viewer = openViewer(file, t);
   await viewer.frame(text => text.includes('RUN_TARGET_') && text.includes(messages.en.followOn));
-  const narrow = await viewer.frame(text => text.split('\n').length === 18 && text.includes('RUN_TARGET_'), () => viewer.send({ resize: [18, 35] }));
-  assert.ok(narrow.split('\n').every(line => width(line) < 35));
+  // A queued old-width frame can have the new row count before resize completes.
+  const narrow = await viewer.frame(text => text.split('\n').length === 18 && text.includes('RUN_TARGET_') &&
+    text.split('\n').includes('─'.repeat(34)), () => viewer.send({ resize: [18, 35] }));
+  assert.ok(narrow.split('\n').every(line => width(line) < 35), narrow);
   assert.doesNotMatch(narrow, /DETAIL_n6|> \[-\] RUN_TARGET/);
   nodes[7].state = 'running';
   state.tasks[7].status = 'running';
