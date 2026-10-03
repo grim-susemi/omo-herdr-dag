@@ -168,13 +168,24 @@ for (const dag of [false, true]) test(`real ${dag ? 'DAG' : 'standalone'} PTY au
   const preferenceKey = JSON.stringify([dag ? 'run' : TASK_SCOPE, dag ? node.id : task.id]);
   await writeJson(file, state);
   let viewer = openViewer(file, t);
-  const matches = (expanded, verbose = false) => text => text.includes('AUTO_CARD') &&
+  const matches = (expanded, verbose = false, includeGraph = true) => text => text.includes('AUTO_CARD') &&
     text.includes('AUTO_PROGRESS') === (expanded || verbose) &&
     text.includes(`Task: ${task.id}`) === verbose &&
     (verbose || text.includes('[+] AUTO_CARD') === !expanded) &&
-    (!dag || text.includes(`[${expanded ? '-' : '+'}] AUTO_NODE`));
+    (!dag || !includeGraph || text.includes(`[${expanded ? '-' : '+'}] AUTO_NODE`));
+  const verifiedFrame = async (expanded, verbose, action, current = () => true) => {
+    const detail = await viewer.frame(text => matches(expanded, verbose, false)(text) && current(text), action);
+    // Recorded metric details increased the verbose card height. Observe the
+    // committed details first, then explicitly reveal the graph if offscreen.
+    // The original complete graph/detail predicate still has to pass.
+    const visible = matches(expanded, verbose)(detail) ? detail :
+      await viewer.frame(text => matches(expanded, verbose)(text) && current(text),
+        () => viewer.send({ keys: '\x1b[5~' }));
+    assert.equal(matches(expanded, verbose)(visible), true);
+    return visible;
+  };
   const check = async (expanded, action, verbose = false) => {
-    const text = await viewer.frame(matches(expanded, verbose), action);
+    const text = await verifiedFrame(expanded, verbose, action);
     if (!verbose) assert.equal(text.split('\n').filter(line => line.startsWith('│')).length, expanded ? 5 : 1);
     return text;
   };
@@ -182,7 +193,8 @@ for (const dag of [false, true]) test(`real ${dag ? 'DAG' : 'standalone'} PTY au
     if (dag) node.state = status;
     else task.status = status;
     task.progress = `AUTO_PROGRESS_${status}`;
-    await viewer.frame(text => matches(expanded, verbose)(text) && (expanded || verbose ? text.includes(task.progress) : text.includes(dag ? 'Completed' : '✓')), () => writeJson(file, state));
+    await verifiedFrame(expanded, verbose, () => writeJson(file, state),
+      text => expanded || verbose ? text.includes(task.progress) : text.includes(dag ? 'Completed' : '✓'));
   };
   await check(false);
   await transition('running', true);
