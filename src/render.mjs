@@ -371,8 +371,9 @@ export function renderFrame(state, { columns = 54, rows = 48, runIndex = 0, scro
     return width(line) <= columns ? line : fit(line, columns);
   });
   while (visible.length < available) visible.push('');
+  const footerStatus = notice || `${state?.connected ? `● ${t(language, 'connected')}` : `○ ${t(language, 'disconnected')}`}${body.length > available ? `  ${start + 1}–${Math.min(start + available, body.length)}/${body.length}` : ''}`;
   const foot = ['─'.repeat(columns),
-    fit(`f ${t(language, follow && state?.connected ? 'followOn' : 'followOff')} · ${notice || `${state?.connected ? `● ${t(language, 'connected')}` : `○ ${t(language, 'disconnected')}`}${body.length > available ? `  ${start + 1}–${Math.min(start + available, body.length)}/${body.length}` : ''}`}`, columns),
+    fit(`${footerStatus} · f ${t(language, follow && state?.connected ? 'followOn' : 'followOff')}`, columns),
     ...(showCloseHint ? [fit(t(language, 'closeHint'), columns)] : []),
     fit(t(language, 'nodeControls'), columns),
     fit(t(language, 'toggleControls'), columns),

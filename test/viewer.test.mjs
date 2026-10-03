@@ -451,7 +451,10 @@ test('real PTY follow reveals graph work, retains parallel targets, hands off an
   state.tasks[6].progress = 'STREAM_UPDATE';
   run.name = 'TOKEN_UPDATE';
   const token = await viewer.frame(text => text.includes('TOKEN_UPDATE') && text.includes('RUN_TARGET_'), () => writeJson(file, state));
-  assert.equal(token.split('\n').find(line => line.startsWith('f ')), stable.split('\n').find(line => line.startsWith('f ')));
+  const stableFooter = stable.split('\n').at(-4);
+  assert.ok(stableFooter.startsWith('● Connected'), stableFooter);
+  assert.match(stableFooter, /\d+–\d+\/\d+ · f /);
+  assert.equal(token.split('\n').at(-4), stableFooter);
   nodes[6].state = 'completed'; state.tasks[6].status = 'completed'; run.name = 'COMPLETION_UPDATE';
   const handoff = await viewer.frame(text => text.includes('COMPLETION_UPDATE') && text.includes('NEXT_TARGET_'), () => writeJson(file, state));
   assert.doesNotMatch(handoff, /RUN_TARGET_|DETAIL_n7/);

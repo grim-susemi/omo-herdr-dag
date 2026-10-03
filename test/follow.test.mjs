@@ -124,11 +124,30 @@ test('standalone follow reveals the running card without changing selection; dis
     assert.ok(frame.scroll > 0 && frame.scroll <= frame.taskRanges.z.start);
     assert.ok(frame.text.includes('TASK_z'));
     assert.ok(!frame.text.includes('> ● TASK_z'));
-    assert.ok(frame.text.includes(messages[language].followOn));
+    assert.ok(frame.text.includes('· f '));
+    const wide = renderFrame(state, { rows: 18, columns: 54, color: false, language, runningTaskId: 'z', now: 1000 });
+    assert.ok(wide.text.includes(messages[language].followOn));
     assert.ok(frame.text.split('\n').every(line => width(line) < 35));
     const disconnected = renderFrame({ ...state, connected: false }, { rows: 80, columns: 54, color: false, language, now: 1000 });
     assert.ok(disconnected.text.includes(messages[language].followOff));
     assert.ok(!disconnected.text.includes('LIVE_TOKEN'));
     assert.ok(disconnected.text.includes(messages[language].disconnected));
+  }
+});
+
+test('narrow footer preserves the complete scroll position before the follow indicator', () => {
+  const tasks = Array.from({ length: 100 }, (_, index) => ({
+    id: String(index), status: 'pending', description: `task ${index}`,
+  }));
+  for (const language of ['en', 'ko', 'zh-cn']) for (const follow of [true, false]) {
+    const options = { columns: 35, rows: 40, scroll: 1, follow, color: false, language };
+    const state = { connected: true, runs: [], tasks };
+    const frame = renderFrame(state, options);
+    const footer = frame.text.split('\n').at(-4);
+    assert.ok(footer.startsWith(`● ${messages[language].connected}  2–33/300 · f `), footer);
+    assert.ok(frame.text.split('\n').every(line => width(line) < 35));
+    const notice = 'NOTICE_한글中文';
+    const withNotice = renderFrame(state, { ...options, notice }).text.split('\n').at(-4);
+    assert.ok(withNotice.startsWith(`${notice} · f `), withNotice);
   }
 });
