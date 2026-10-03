@@ -15,7 +15,8 @@ export function renderFixedFrame(state, options, view) {
   if (view === 'dag' && !state?.runs?.length) {
     const head = ['OMO  /  DAG', `DAG (0) - ${t(state?.language, 'none')}`];
     const body = [options.error || '', state?.connected ? t(state?.language, 'waiting') : t(state?.language, 'disconnected')];
-    const foot = [`f ${t(state?.language, options.follow && state?.connected ? 'followOn' : 'followOff')}`,
+    const foot = [options.error ? t(state?.language, 'readError', { error: options.error }) :
+      `f ${t(state?.language, options.follow && state?.connected ? 'followOn' : 'followOff')}`,
       t(state?.language, 'nodeControls'), t(state?.language, 'toggleControls'), t(state?.language, 'controls')];
     const lines = [...head, ...body];
     while (lines.length < Math.max(0, rows - foot.length)) lines.push('');
@@ -132,16 +133,26 @@ function bindPresence() {
 function isActive(run) { return run.status === 'running' || run.nodes.some(node => node.state === 'running'); }
 function selectableRuns() { return (state?.runs ?? []).filter(run => isActive(run) || completedExpanded); }
 async function restorePreferences() {
-  try { viewState = await loadViewState(file, state?.sessionId); viewError = ''; }
-  catch (cause) { viewState = emptyViewState(state?.sessionId); viewError = cause.message; }
+  const scope = fixedView ? state : undefined;
+  try { viewState = await loadViewState(file, state?.sessionId, scope); viewError = ''; }
+  catch (cause) { viewState = emptyViewState(state?.sessionId, scope); viewError = cause.message; }
+  const navigation = viewState.navigation;
+  follow = navigation?.follow ?? true;
+  scroll = navigation?.scroll ?? 0;
+  view = fixedView ?? navigation?.view ?? view;
+  selectedId = navigation?.selectedId ?? selectedId;
+  selectedTaskId = navigation?.selectedTaskId;
+  selectedNodes.clear();
+  for (const pair of navigation?.selectedNodes ?? []) selectedNodes.set(...pair);
+  completedExpanded = navigation?.completedExpanded ?? false;
 }
 await restorePreferences();
 const interactive = Boolean(process.stdout.isTTY && process.stdin.isTTY);
 function draw() {
   if (closing) return;
-  if (state?.connected) target = runningTarget(!fixedView ? state : fixedView === 'dag' ?
+  if (!error) target = runningTarget(!fixedView ? state : fixedView === 'dag' ?
     { ...state, tasks: [] } : { ...state, runs: [], tasks: standaloneTasks(state) }, target);
-  const running = follow && state?.connected ? target : undefined;
+  const running = !error && follow && state?.connected ? target : undefined;
   if (running) {
     if (view !== running.view || running.view === 'dag' && selectedId !== running.runId) scroll = 0;
     view = fixedView ?? running.view;
@@ -238,9 +249,11 @@ process.stdin.on('keypress', (text, pressed) => {
   if (closing) return;
   const key = pressed.sequence || pressed.name || text;
   if (key === 'q' || key === '\x03' || key === '\x04') return void close(true);
+  let manual = false, movedScroll = false, movedSelection = false;
   if (key === 'f') { follow = !follow; revealSelection = false; }
   if (['\x1b[B', 'j', '\x1b[A', 'k', '\x1b[6~', '\x1b[5~'].includes(key)) {
     follow = false; revealSelection = false;
+    manual = movedScroll = true;
   }
   if (key === '\x1b[B' || key === 'j') scroll++;
   if (key === '\x1b[A' || key === 'k') scroll = Math.max(0, scroll - 1);
@@ -248,16 +261,19 @@ process.stdin.on('keypress', (text, pressed) => {
   if (key === '\x1b[5~') scroll = Math.max(0, scroll - Math.max(1, (process.stdout.rows ?? 48) - 8));
   if (!fixedView && key === 't' && state?.runs?.length) {
     follow = false;
+    manual = movedSelection = true;
     view = view === 'dag' ? 'tasks' : 'dag';
     scroll = 0; revealSelection = true;
   }
   if ((key === 'c' || pressed.name === 'c') && (state?.runs?.length ?? 0) > 1) {
     follow = false;
+    manual = movedSelection = true;
     completedExpanded = !completedExpanded;
     scroll = 0; revealSelection = true;
   }
   if ((!fixedView || view === 'dag') && (key === '\x1b[C' || key === '\x1b[D')) {
     follow = false;
+    manual = movedSelection = true;
     const runs = selectableRuns();
     const current = Math.max(0, runs.findIndex(run => run.id === selectedId));
     selectedId = runs[(current + (key === '\x1b[C' ? 1 : -1) + runs.length) % runs.length]?.id;
@@ -270,6 +286,7 @@ process.stdin.on('keypress', (text, pressed) => {
   const itemId = view === 'tasks' ? selectedTaskId : selectedNodes.get(selectedId);
   if (items.length && (pressed.name === 'tab' || key === 'n' || key === 'p')) {
     follow = false;
+    manual = movedSelection = true;
     const current = Math.max(0, items.findIndex(item => item.id === itemId));
     const direction = pressed.shift || key === 'p' ? -1 : 1;
     const nextId = items[(current + direction + items.length) % items.length].id;
@@ -279,25 +296,40 @@ process.stdin.on('keypress', (text, pressed) => {
   }
   if (items.length && key === 'd') {
     follow = false;
+    manual = true;
     // A temporary detail peek never writes or replaces the saved fold state.
     verbose = !verbose;
     revealSelection = true;
   }
   if (items.length && (key === ' ' || key === '\r' || key === '\n')) {
     follow = false;
+    manual = true;
     verbose = false;
     const item = items.find(item => item.id === itemId);
     const status = view === 'tasks' ? item.status : item.state;
     setExpanded(viewState, scope, itemId, !isExpanded(viewState, scope, itemId, status));
-    const snapshot = structuredClone(viewState);
-    saving = saving.then(() => saveViewState(file, snapshot)).then(() => {
-      if (viewError) { viewError = ''; draw(); }
-    }, cause => {
-      viewError = cause.message; draw();
-    });
     revealSelection = true;
   }
   draw();
+  if (manual || key === 'f') {
+    viewState.navigation ??= { follow };
+    viewState.navigation.follow = follow;
+    if (movedScroll || movedSelection) viewState.navigation.scroll = scroll;
+    if (movedSelection) {
+      viewState.navigation.view = view;
+      viewState.navigation.selectedId = selectedId;
+      viewState.navigation.selectedTaskId = selectedTaskId;
+      viewState.navigation.selectedNodes = [...selectedNodes].filter(pair => pair.every(value => typeof value === 'string'));
+      viewState.navigation.completedExpanded = completedExpanded;
+    }
+    // A transient follow reveal/detail peek never becomes saved manual scroll.
+    if (!viewError) {
+      const snapshot = structuredClone(viewState);
+      saving = saving.then(() => saveViewState(file, snapshot)).catch(cause => {
+        viewError = cause.message; draw();
+      });
+    }
+  }
 });
 process.on('SIGTERM', () => { void close(); }); process.on('SIGINT', () => { void close(); }); process.on('SIGHUP', () => { void close(); });
 bindPresence();

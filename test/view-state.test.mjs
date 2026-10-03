@@ -76,3 +76,27 @@ test('sidecar validates boundary data and does not hide corrupt state', async t 
   assert.equal(isExpanded(view, '__proto__', 'constructor'), false);
   assert.equal(isExpanded(view, '__proto__', 'other'), false);
 });
+
+test('scoped manual navigation restores only the same owner, session and epoch', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'scoped-follow-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = join(dir, 'workers.json');
+  const scope = { ownerKey: 'owner', scopeEpoch: 3 };
+  const view = await loadViewState(file, 'session', scope);
+  view.navigation = { follow: false, scroll: 12, view: 'tasks', selectedTaskId: 'worker',
+    selectedNodes: [['run', 'node']], completedExpanded: false };
+  setExpanded(view, TASK_SCOPE, 'worker', false);
+  await saveViewState(file, view);
+  assert.deepEqual(await loadViewState(file, 'session', scope), view);
+  for (const [session, other] of [['other', scope], ['session', { ...scope, scopeEpoch: 4 }],
+    ['session', { ...scope, ownerKey: 'foreign' }]]) {
+    const restored = await loadViewState(file, session, other);
+    assert.equal(restored.navigation, undefined);
+    assert.deepEqual(restored.expanded, {});
+  }
+  for (const navigation of [{ follow: 'false' }, { follow: false, scroll: -1 },
+    { follow: true, selectedNodes: [['run']] }, { follow: true, selectedTaskId: 1 }]) {
+    await writeFile(`${file}.view.json`, JSON.stringify({ ...view, navigation }));
+    await assert.rejects(loadViewState(file, 'session', scope), /navigation preferences/);
+  }
+});

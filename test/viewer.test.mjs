@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { EventEmitter, once } from 'node:events';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { watch } from 'node:fs';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -28,10 +30,12 @@ test('real standalone PTY respects saved folds, preserves task selection, switch
   const fresh = await viewer.frame(text => text.includes('> ● [+] FIRST_DESCRIPTION'));
   assert.equal(fresh.split('\n').filter(line => line.startsWith('│')).length, 2);
   assert.doesNotMatch(fresh, /FIRST_PROGRESS|REAL_MODEL|EXPLICIT_CHILD/);
-  await viewer.frame(text => text.includes('FIRST_PROGRESS'), () => viewer.send({ keys: 'd' }));
+  const pausedPreferences = await preferenceWritten(file, value => value.navigation?.follow === false,
+    () => viewer.frame(text => text.includes('FIRST_PROGRESS'), () => viewer.send({ keys: 'd' })));
   const foldedAgain = await viewer.frame(text => text.includes('> ● [+] FIRST_DESCRIPTION'), () => viewer.send({ keys: 'd' }));
   assert.doesNotMatch(foldedAgain, /FIRST_PROGRESS|EXPLICIT_CHILD/);
-  assert.deepEqual(JSON.parse(await readFile(`${file}.view.json`, 'utf8')), preferences);
+  assert.deepEqual(pausedPreferences.expanded, preferences.expanded);
+  assert.deepEqual(pausedPreferences.navigation, { follow: false });
   const initial = await viewer.frame(text => text.includes('> ● FIRST_DESCRIPTION') && text.includes('FIRST_PROGRESS'), () => viewer.send({ keys: ' ' }));
   for (const value of [messages.ko.tasks, 'REAL_CATEGORY', 'REAL_MODEL', 'FIRST_PROGRESS']) assert.ok(initial.includes(value), value);
   await viewer.frame(text => text.includes('> ✓ [+] SECOND_DESCRIPTION'), () => viewer.send({ keys: '\t' }));
@@ -75,7 +79,8 @@ test('real standalone PTY respects saved folds, preserves task selection, switch
   await viewer.close();
   assert.equal(JSON.parse(await readFile(`${file}.view.json`, 'utf8')).expanded[JSON.stringify([TASK_SCOPE, 'st_a'])], true);
   viewer = openViewer(file, t);
-  await viewer.frame(text => text.includes('> ● [+] NEW_DESCRIPTION'));
+  await viewer.frame(text => text.includes('> ● FIRST_DESCRIPTION') && text.includes('FIRST_PROGRESS'));
+  await viewer.frame(text => text.includes('> ● [+] NEW_DESCRIPTION'), () => viewer.send({ keys: 'p' }));
   const restored = await viewer.frame(text => text.includes('> ● FIRST_DESCRIPTION') && text.includes('FIRST_PROGRESS'), () => viewer.send({ keys: 'n' }));
   assert.ok(restored.includes('EXPLICIT_CHILD'));
   await viewer.close();
@@ -126,7 +131,11 @@ test('real PTY compact cards expose full selected progress with d without persis
   await viewer.frame(text => text.includes('PROGRESS_TAIL'), () => viewer.send({ keys: 'd' }));
   await viewer.close();
   const saved = JSON.parse(await readFile(`${file}.view.json`, 'utf8'));
-  assert.deepEqual(saved, { version: 1, sessionId: state.sessionId, expanded: { ...expanded, '[null,"a-full-id"]': false } });
+  assert.equal(saved.version, 1);
+  assert.equal(saved.sessionId, state.sessionId);
+  assert.deepEqual(saved.expanded, { ...expanded, '[null,"a-full-id"]': false });
+  assert.equal(saved.navigation.follow, false);
+  assert.equal(saved.navigation.selectedTaskId, 'a-full-id');
   viewer = openViewer(file, t);
   const restarted = await viewer.frame(text => text.includes('> ✓ [+] COMPACT_DESCRIPTION'));
   assert.doesNotMatch(restarted, /PROGRESS_HEAD|PROGRESS_TAIL|a-full-id/);
@@ -208,7 +217,9 @@ for (const dag of [false, true]) test(`real ${dag ? 'DAG' : 'standalone'} PTY au
   await transition('running', true, true);
   await check(true, () => viewer.send({ keys: 'd' }));
   await viewer.close();
-  await assert.rejects(readFile(`${file}.view.json`), { code: 'ENOENT' });
+  const manualOnly = JSON.parse(await readFile(`${file}.view.json`, 'utf8'));
+  assert.deepEqual(manualOnly.expanded, {});
+  assert.equal(manualOnly.navigation.follow, false);
   viewer = openViewer(file, t);
   await check(true);
   await check(false, () => viewer.send({ keys: ' ' }));
@@ -291,12 +302,31 @@ finally:
   os.close(master)
 `;
 
-function openViewer(file, t) {
+async function preferenceWritten(file, predicate, action) {
+  let resolve, reject;
+  const changed = new Promise((done, fail) => { resolve = done; reject = fail; });
+  const abort = AbortSignal.timeout(5000);
+  const watcher = watch(join(file, '..'), (_event, name) => {
+    if (String(name) !== file.split(/[\\/]/).at(-1) + '.view.json') return;
+    void readFile(`${file}.view.json`, 'utf8').then(raw => {
+      const value = JSON.parse(raw);
+      if (predicate(value)) resolve(value);
+    }, reject);
+  });
+  const failed = () => reject(new Error('Missing exact preference write'));
+  abort.addEventListener('abort', failed, { once: true });
+  watcher.on('error', reject);
+  try { const [value] = await Promise.all([changed, action()]); return value; }
+  finally { watcher.close(); abort.removeEventListener('abort', failed); }
+}
+
+function openViewer(file, t, options = []) {
   const events = new EventEmitter();
-  const viewerArgs = [fileURLToPath(new URL('../src/viewer.mjs', import.meta.url)), '--state', file];
+  const viewerArgs = [fileURLToPath(new URL('../src/viewer.mjs', import.meta.url)), '--state', file, ...options];
   const child = process.platform === 'win32'
     ? spawn(process.execPath, [fileURLToPath(new URL('./windows-pty.mjs', import.meta.url)), ...viewerArgs], { stdio: ['pipe', 'pipe', 'pipe'] })
     : spawn('python3', ['-u', '-c', bridge, process.execPath, ...viewerArgs], { stdio: ['pipe', 'pipe', 'pipe'] });
+  console.log(`TASK8_PTY_RESOURCE ${JSON.stringify({ workerPid: child.pid, argv: viewerArgs, statePath: file })}`);
   let buffer = '', stderr = '', lastFrame = '';
   child.stderr.on('data', data => { stderr += data; });
   child.stdout.setEncoding('utf8');
@@ -310,7 +340,13 @@ function openViewer(file, t) {
       end = buffer.indexOf('\n');
     }
   });
-  t.after(() => { child.stdin.end(); });
+  t.after(async () => {
+    if (child.exitCode === null) {
+      const exited = once(child, 'exit', { signal: AbortSignal.timeout(5000) });
+      child.stdin.end(); await exited;
+    }
+    console.log(`TASK8_PTY_CLEANED ${JSON.stringify({ workerPid: child.pid, exitCode: child.exitCode, statePath: file })}`);
+  });
   const send = value => child.stdin.write(`${JSON.stringify(value)}\n`);
   function frame(predicate, action = () => {}) {
     return new Promise((resolve, reject) => {
@@ -393,13 +429,15 @@ test('real viewer PTY selects, toggles, refreshes, switches runs and persists ac
   assert.equal(saved.expanded['["r1","a"]'], false);
   assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), state);
   viewer = openViewer(file, t);
-  await viewer.frame(text => text.includes('[+] ALPHA'));
-  await viewer.frame(text => text.includes('> ● [+] RETRY_DESCRIPTION'), () => viewer.send({ keys: 'n' }));
+  await viewer.frame(text => text.includes('> [+] NEW_NODE') && text.includes(messages.en.followOff));
+  await viewer.frame(text => text.includes('> ● [+] RETRY_DESCRIPTION'), () => viewer.send({ keys: 'p' }));
   await viewer.frame(text => text.includes('> ● RETRY_DESCRIPTION'), () => viewer.send({ keys: '\r' }));
   await viewer.close();
   assert.equal(JSON.parse(await readFile(`${file}.view.json`, 'utf8')).expanded['["r1","a"]'], true);
   viewer = openViewer(file, t);
-  const restored = await viewer.frame(text => text.includes('UPDATED_RUN') && text.includes('[-] ALPHA'));
+  await viewer.frame(text => text.includes('UPDATED_RUN') && text.includes(messages.en.followOff));
+  const restored = await viewer.frame(text => text.includes('UPDATED_RUN') && text.includes('[-] ALPHA'),
+    () => viewer.send({ keys: '\x1b[5~'.repeat(8) }));
   assert.ok(restored.includes('[-] BETA'));
   assert.ok(restored.includes('[+] NEW_NODE'));
   await viewer.close();
@@ -526,6 +564,41 @@ test('real PTY follows empty/task/DAG transitions, keeps a running task on paral
   await viewer.frame(text => text.includes('RETURNED_TASK') && text.includes(messages['zh-cn'].followOn), () => writeJson(file, state));
   await viewer.close();
 });
+for (const view of ['dag', 'tasks']) test(`fixed ${view} retains an active target across same-scope source read errors`, { timeout: 30000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'task8-read-error-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = join(dir, 'role.json');
+  const nodes = [{ id: 'a', label: 'EARLIER_GRAPH', state: 'completed', taskId: 'linked-a' },
+    { id: 'z', label: 'RETAINED_GRAPH', state: 'running', taskId: 'linked-z' }];
+  const state = { sessionId: 'same-scope-read-error', connected: true, language: 'en',
+    runs: view === 'dag' ? [{ id: 'run', name: 'ERROR_RETENTION', status: 'running', nodes,
+      edges: [{ from: 'a', to: 'z' }] }] : [],
+    tasks: view === 'dag' ? nodes.map(node => ({ id: node.taskId, status: node.state, description: node.label })) :
+      [{ id: 'a', status: 'completed', description: 'EARLIER_WORKER' },
+        { id: 'z', status: 'running', description: 'RETAINED_WORKER' }] };
+  await writeJson(file, state);
+  const viewer = openViewer(file, t, ['--view', view]);
+  const retained = view === 'dag' ? 'RETAINED_GRAPH' : '> ● RETAINED_WORKER';
+  const narrowRows = view === 'dag' ? 18 : 12;
+  await viewer.frame(text => text.includes(retained) && text.includes(messages.en.followOn));
+  await viewer.frame(text => text.split('\n').length === narrowRows && text.includes(retained),
+    () => viewer.send({ resize: [narrowRows, 80] }));
+  if (view === 'dag') { nodes[0].state = 'running'; state.runs[0].name = 'PARALLEL_ERROR_RETENTION'; }
+  state.tasks[0].status = 'running';
+  state.tasks.at(-1).description += '_PARALLEL';
+  await viewer.frame(text => text.includes(retained) && text.includes('PARALLEL'), () => writeJson(file, state));
+  await viewer.frame(text => text.split('\n').length === 60 && text.includes('Read error:'), async () => {
+    await writeFile(file, '{');
+    viewer.send({ resize: [60, 80] });
+  });
+  await viewer.frame(text => text.split('\n').length === narrowRows && text.includes('Read error:'),
+    () => viewer.send({ resize: [narrowRows, 80] }));
+  const recovered = await viewer.frame(text => !text.includes('Read error:') &&
+    text.includes(retained) && text.includes(messages.en.followOn), () => writeJson(file, state));
+  assert.doesNotMatch(recovered, view === 'dag' ? /EARLIER_GRAPH/ : /> ● EARLIER_WORKER/);
+  await viewer.close();
+  assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), state);
+});
 
 test('real viewer clock advances elapsed without new snapshots or input', { timeout: 15000 }, async t => {
   const dir = await mkdtemp(join(tmpdir(), 'dag-clock-'));
@@ -556,4 +629,72 @@ test('real viewer clock advances elapsed without new snapshots or input', { time
   await viewer.frame(text => seconds(text) === 9, () => viewer.send({ keys: 'n' }));
   await viewer.close();
   console.log('PTY clock evidence: two elapsed advances without snapshots/input; completed duration frozen at 00:00:09.');
+});
+
+for (const view of ['dag', 'tasks']) test(`fixed ${view} follow keeps auto reveal transient and restores scoped manual viewport/cursor/fold`, { timeout: 30000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), `task8-${view}-`));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = join(dir, 'role.json');
+  const nodes = Array.from({ length: 9 }, (_, index) => ({ id: `n${index}`, label: `GRAPH_${index}`,
+    state: index === 8 ? 'running' : 'completed', taskId: `linked-${index}` }));
+  const state = { schema: 'omo-herdr-dashboard/role/1', sessionId: 'task8-scope', socketPath: 'fixture',
+    parentPaneId: 'fixture-parent', tabId: 'fixture-tab', paneId: 'fixture-owned', scopeEpoch: 1,
+    role: view === 'dag' ? 'dag' : 'workers', launchToken: 'task8-test', connected: true, language: 'en',
+    controlOffer: null, presenceOffer: null,
+    runs: [{ id: 'run', name: 'TASK8_RUN', status: 'running', nodes,
+      edges: nodes.slice(1).map((node, index) => ({ from: nodes[index].id, to: node.id })) }],
+    tasks: [...nodes.map(node => ({ id: node.taskId, status: node.state, description: `LINKED_${node.id}` })),
+      ...Array.from({ length: 10 }, (_, index) => ({ id: `a${index}`, status: 'completed', description: `ORDINARY_${index}` })),
+      { id: 'z', status: 'running', description: 'RETAINED_WORKER' }] };
+  state.ownerKey = createHash('sha256').update(JSON.stringify([state.socketPath, state.parentPaneId, state.sessionId]))
+    .digest('hex').slice(0, 24);
+  const options = ['--view', view, '--close-pane', state.paneId, '--launch-token', state.launchToken];
+  await writeJson(file, state);
+  let viewer = openViewer(file, t, options);
+  const marker = view === 'dag' ? 'GRAPH_8' : 'RETAINED_WORKER';
+  await viewer.frame(text => text.includes(marker) && text.includes(messages.en.followOn));
+  state.tasks.filter(task => task.id.startsWith('a')).forEach(task => { task.status = 'running'; });
+  state.tasks.find(task => task.id === 'z').description = 'RETAINED_WORKER_UPDATE';
+  state.runs[0].name = 'PARALLEL_ARRIVAL';
+  const automatic = await viewer.frame(text => text.includes(marker) && text.includes(messages.en.followOn) &&
+    (view === 'dag' ? text.includes('PARALLEL_ARRIVAL') : text.includes('RETAINED_WORKER_UPDATE')), () => writeJson(file, state));
+  assert.doesNotMatch(automatic, /LINKED_n8/);
+  await viewer.frame(text => text.includes(messages.en.followOff), () => viewer.send({ keys: 'f' }));
+  await viewer.close();
+  const justPaused = JSON.parse(await readFile(`${file}.view.json`, 'utf8'));
+  assert.deepEqual(justPaused.navigation, { follow: false }, 'f must not persist an automatic scroll or target cursor');
+  viewer = openViewer(file, t, options);
+  await viewer.frame(text => text.includes(messages.en.followOff));
+  await viewer.frame(text => text.includes(view === 'dag' ? marker : 'ORDINARY_0') &&
+    text.includes(messages.en.followOn), () => viewer.send({ keys: 'f' }));
+  const selection = view === 'dag' ? 'LINKED_n8' : 'RETAINED_WORKER_UPDATE';
+  await viewer.frame(text => text.includes(selection) && text.includes(messages.en.followOff), () => viewer.send({ keys: 'p' }));
+  await viewer.frame(text => text.includes(`[+] ${selection}`), () => viewer.send({ keys: ' ' }));
+  await viewer.frame(text => text.includes(selection) && text.includes(messages.en.followOff), () => viewer.send({ keys: 'k' }));
+  await viewer.close();
+  const saved = JSON.parse(await readFile(`${file}.view.json`, 'utf8'));
+  assert.equal(saved.navigation.follow, false);
+  assert.ok(saved.navigation.scroll > 0);
+  assert.equal(saved.scopeEpoch, 1);
+  if (view === 'dag') assert.equal(new Map(saved.navigation.selectedNodes).get('run'), 'n8');
+  else assert.equal(saved.navigation.selectedTaskId, 'z');
+  const source = await readFile(file, 'utf8');
+  viewer = openViewer(file, t, options);
+  await viewer.frame(text => text.includes(selection) && text.includes(messages.en.followOff));
+  await viewer.frame(text => text.includes(selection) && text.includes(messages.en.followOff), () => writeJson(file, state));
+  const narrow = await viewer.frame(text => text.split('\n').length === 18 && text.includes(messages.en.followOff) &&
+    text.split('\n').includes('─'.repeat(34)), () => viewer.send({ resize: [18, 35] }));
+  assert.ok(narrow.split('\n').every(line => width(line) < 35));
+  await viewer.close();
+  assert.deepEqual(JSON.parse(await readFile(`${file}.view.json`, 'utf8')), saved);
+  assert.equal(await readFile(file, 'utf8'), source);
+  state.scopeEpoch = 2;
+  state.runs = [];
+  state.tasks = [{ id: 'new', status: 'running', description: 'NEW_SCOPE_WORKER' }];
+  await writeJson(file, state);
+  viewer = openViewer(file, t, options);
+  const rebased = await viewer.frame(text => text.includes(messages.en.followOn) &&
+    text.includes(view === 'dag' ? 'DAG (0)' : 'NEW_SCOPE_WORKER'));
+  assert.doesNotMatch(rebased, /GRAPH_8|RETAINED_WORKER|LINKED_n8|ORDINARY_9/);
+  await viewer.close();
 });

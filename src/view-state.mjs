@@ -1,17 +1,30 @@
 import { readJson, writeJson } from './storage.mjs';
 
-export function emptyViewState(sessionId) {
-  return { version: 1, sessionId: sessionId ?? null, expanded: {} };
+export function emptyViewState(sessionId, scope) {
+  return { version: 1, sessionId: sessionId ?? null, expanded: {},
+    ...(scope ? { ownerKey: scope.ownerKey, scopeEpoch: scope.scopeEpoch } : {}) };
 }
 
-export async function loadViewState(stateFile, sessionId) {
+export async function loadViewState(stateFile, sessionId, scope) {
   const saved = await readJson(`${stateFile}.view.json`);
-  if (!saved) return emptyViewState(sessionId);
+  if (!saved) return emptyViewState(sessionId, scope);
   if (saved.version !== 1 || !saved.expanded || typeof saved.expanded !== 'object' ||
       Array.isArray(saved.expanded) || Object.values(saved.expanded).some(value => typeof value !== 'boolean')) {
     throw new Error('Invalid DAG view preferences.');
   }
-  return saved.sessionId === (sessionId ?? null) ? saved : emptyViewState(sessionId);
+  const navigation = saved.navigation;
+  if (navigation !== undefined && (!navigation || typeof navigation !== 'object' || Array.isArray(navigation) ||
+      typeof navigation.follow !== 'boolean' ||
+      navigation.scroll !== undefined && (!Number.isSafeInteger(navigation.scroll) || navigation.scroll < 0) ||
+      navigation.view !== undefined && !['dag', 'tasks'].includes(navigation.view) ||
+      ['selectedId', 'selectedTaskId'].some(key => navigation[key] !== undefined && typeof navigation[key] !== 'string') ||
+      navigation.completedExpanded !== undefined && typeof navigation.completedExpanded !== 'boolean' ||
+      navigation.selectedNodes !== undefined && (!Array.isArray(navigation.selectedNodes) ||
+        navigation.selectedNodes.some(pair => !Array.isArray(pair) || pair.length !== 2 ||
+          pair.some(value => typeof value !== 'string'))))) throw new Error('Invalid DAG navigation preferences.');
+  return saved.sessionId === (sessionId ?? null) && (!scope ||
+    saved.ownerKey === scope.ownerKey && saved.scopeEpoch === scope.scopeEpoch)
+    ? saved : emptyViewState(sessionId, scope);
 }
 
 const key = (runId, nodeId) => JSON.stringify([runId, nodeId]);

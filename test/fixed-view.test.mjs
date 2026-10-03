@@ -45,7 +45,22 @@ for (const [columns, rows] of [[80, 24], [40, 16], [24, 8], [12, 4], [1, 1]])
     assert.deepEqual(empty.runs, []);
   });
 
+for (const view of ['dag', 'tasks']) for (const columns of [80, 24])
+  test(`fixed ${view} read errors stay visible at ${columns} columns while scrolled`, () => {
+    const options = { columns, rows: 14, color: false, scroll: 100, follow: true, error: 'SOURCE_UNAVAILABLE' };
+    const frame = renderFixedFrame(state, options, view).text;
+    assert.match(frame.split('\n').at(-4), /^Read error:/);
+    assert.doesNotMatch(frame, /Follow ON.*Connected/);
+    assert.ok(frame.split('\n').every(line => width(line) < columns));
+    if (view === 'dag') {
+      const empty = renderFixedFrame({ ...state, runs: [] }, options, view).text;
+      assert.match(empty.split('\n').at(-4), /^Read error:/);
+      assert.doesNotMatch(empty, /ORDINARY_ROOT|Tasks|Follow ON/);
+    }
+  });
+
 const fixedPosixBridge = String.raw`
+
 import os, sys, pty, subprocess, selectors, json, fcntl, termios, struct, signal
 master, slave = pty.openpty()
 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 26, 80, 0, 0))
