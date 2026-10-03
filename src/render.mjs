@@ -277,7 +277,7 @@ function compactTaskLines(task, language, timing, columns, { selected = false, n
   });
 }
 
-function descendantLines(task, tasks, language, timing, columns) {
+function taskDescendants(task, tasks) {
   // Only parentTaskId establishes ownership. DAG edges never imply subtasks.
   const visited = new Set(task ? [task.id] : []);
   const descendants = [];
@@ -286,10 +286,21 @@ function descendantLines(task, tasks, language, timing, columns) {
     const { task: child, depth } = pending.shift();
     if (visited.has(child.id)) continue;
     visited.add(child.id);
-    descendants.push(...compactTaskLines(child, language, timing, columns, { depth }));
+    descendants.push({ task: child, depth });
     pending.unshift(...tasks.filter(task => task.parentTaskId === child.id).map(task => ({ task, depth: depth + 1 })));
   }
   return descendants;
+}
+
+export function completedTasks(state) {
+  return standaloneTasks(state).filter(task => task.status === 'completed' &&
+    taskDescendants(task, state?.tasks ?? []).every(({ task: child }) =>
+      terminal.has(child.status) && !['failed', 'error', 'lost'].includes(child.status)));
+}
+
+function descendantLines(task, tasks, language, timing, columns) {
+  return taskDescendants(task, tasks).flatMap(({ task: child, depth }) =>
+    compactTaskLines(child, language, timing, columns, { depth }));
 }
 
 function detailBox(text, columns, color, status, label) {
@@ -302,13 +313,14 @@ function detailBox(text, columns, color, status, label) {
     paint(`╰${'─'.repeat(Math.max(0, columns - 2))}╯`, border, color)];
 }
 
-function taskCard(task, tasks, columns, color, language, timing, { selected, expanded, verbose, node }) {
+function taskCard(task, tasks, columns, color, language, timing, { selected, expanded, verbose, node, compactCompleted = false }) {
   const detailed = selected && verbose;
   const compact = compactTaskLines(task, language, timing, columns, { selected, node, collapsed: !expanded && !detailed });
   const text = detailed ? [compact[0], ...(node ? [`${clean(node.label)} (${clean(node.id)})`, `${icons[node.state]} ${t(language, node.state)}`] : []),
     ...taskLines(task, language, timing, node?.state)] : expanded ? compact : compact.slice(0, 1);
   if (expanded || detailed) text.push(...descendantLines(task, tasks, language, timing, columns));
-  return detailBox(text, columns, color, node?.state ?? task?.status, node?.label ?? node?.id);
+  return compactCompleted && !expanded && !detailed ? [fit(compact[0], columns)] :
+    detailBox(text, columns, color, node?.state ?? task?.status, node?.label ?? node?.id);
 }
 
 const RUN_SELECTOR_LIMIT = 5;
@@ -332,7 +344,7 @@ function terminalState(status) { return terminal.has(status); }
 
 export function renderFrame(state, { columns = 54, rows = 48, runIndex = 0, scroll = 0, color = true, error = '', language = state?.language ?? 'en',
   selectedNodeId, selectedTaskId, view, viewState, verbose = false, revealSelection = false, notice = '', now = Date.now(), completedExpanded = false,
-  follow = true, runningNodeId, runningTaskId } = {}) {
+  follow = true, runningNodeId, runningTaskId, offline = false } = {}) {
   columns = Math.max(1, columns - 1);
   rows = Math.max(1, rows);
   const all = state?.runs ?? [];
@@ -346,14 +358,22 @@ export function renderFrame(state, { columns = 54, rows = 48, runIndex = 0, scro
   const head = [paint(fit(`OMO  /  ${tasksView ? t(language, 'tasks') : 'DAG'}${switcher}`, columns), accent, color),
     fit(tasksView ? tasksTitle : `${t(language, 'selectedRun', { name: run.name })} · ${t(language, 'activeRuns', { count: activeRuns.length })}`, columns)];
   const body = [], nodeRanges = Object.create(null), taskRanges = Object.create(null), graphRanges = Object.create(null);
-  if (error) body.push(t(language, 'readError', { error: clean(error) }), t(language, 'keepLast'), '');
+  if (error) body.push(t(language, 'readError', { error: clean(error) }), t(language, 'keepLast'),
+    ...(state?.connected ? [] : [t(language, 'disconnected')]), '');
   if (tasksView && (roots.length || all.length)) {
-    head.push('');
+    const completed = new Set(completedTasks(state).map(task => task.id));
+    if (completed.size) head[1] = fit(`${tasksTitle} · ${t(language, 'completedTasks', { count: completed.size })} ${completedExpanded ? '[-]' : '[+]'}`, columns);
     for (const task of roots) {
+      const compactCompleted = completed.has(task.id);
+      const explicit = viewState?.expanded?.[JSON.stringify([TASK_SCOPE, task.id])];
+      const protectedParent = task.status === 'completed' && !compactCompleted;
+      const expanded = typeof explicit === 'boolean' ? explicit :
+        protectedParent || isExpanded(viewState, TASK_SCOPE, task.id, task.status);
+      if (compactCompleted && !completedExpanded && !expanded && task.id !== selectedTaskId) continue;
       const start = body.length;
       body.push(...taskCard(task, state?.tasks ?? [], columns, color, language,
         { now, connected: state?.connected, updatedAt: state?.updatedAt },
-        { selected: task.id === selectedTaskId, expanded: isExpanded(viewState, TASK_SCOPE, task.id, task.status), verbose }));
+        { selected: task.id === selectedTaskId, expanded, verbose, compactCompleted }));
       taskRanges[task.id] = { start, end: body.length };
     }
     if (!roots.length) body.push(t(language, 'none'));
@@ -393,7 +413,8 @@ export function renderFrame(state, { columns = 54, rows = 48, runIndex = 0, scro
     body.push('', `  ○  ${t(language, 'waiting')}`, '', `  ${t(language, 'waitingLine1')}`, `  ${t(language, 'waitingLine2')}`);
   }
   const showCloseHint = !state?.connected;
-  const available = Math.max(0, rows - head.length - (showCloseHint ? 6 : 5));
+  const narrow = columns < 40;
+  const available = Math.max(0, rows - head.length - (tasksView || narrow ? 4 : showCloseHint ? 6 : 5));
   const selected = tasksView ? taskRanges[selectedTaskId] : nodeRanges[selectedNodeId];
   if (revealSelection && selected && available > 0) {
     if (verbose || selected.start < scroll || selected.start + Math.min(3, available) > scroll + available) scroll = selected.start;
@@ -406,14 +427,30 @@ export function renderFrame(state, { columns = 54, rows = 48, runIndex = 0, scro
     // Preserve ANSI colors when the already sized graph fits.
     return width(line) <= columns ? line : fit(line, columns);
   });
+  if (tasksView) for (const range of Object.values(taskRanges)) {
+    const from = Math.max(start, range.start), to = Math.min(start + available, range.end);
+    if (to - from === 1 && (from === range.start || from === range.end - 1) &&
+        /^[╭╰]─+[╮╯]$/.test(clean(body[from]))) visible[from - start] = '';
+  }
   while (visible.length < available) visible.push('');
-  const foot = ['─'.repeat(columns),
-    fit(error ? t(language, 'readError', { error: clean(error) }) :
-      `f ${t(language, follow && state?.connected ? 'followOn' : 'followOff')} · ${notice || `${state?.connected ? `● ${t(language, 'connected')}` : `○ ${t(language, 'disconnected')}`}${body.length > available ? `  ${start + 1}–${Math.min(start + available, body.length)}/${body.length}` : ''}`}`, columns),
-    ...(showCloseHint ? [fit(t(language, 'closeHint'), columns)] : []),
-    fit(t(language, 'nodeControls'), columns),
-    fit(t(language, 'toggleControls'), columns),
-    fit(`${t(language, 'controls')}  c ${t(language, 'toggleCompleted')}`, columns)];
+  if (!tasksView && narrow && available === 1) {
+    const node = run.nodes.find(node => node.id === runningNodeId) ??
+      run.nodes.find(node => graphRanges[node.id]?.start <= start && graphRanges[node.id]?.end > start) ??
+      run.nodes.find(node => node.id === selectedNodeId) ?? run.nodes[0];
+    if (node) visible[0] = fit(`${icons[node.state]} ${clean(node.label ?? node.id)}`, columns);
+  }
+  const range = body.length > available ? ` ${start + 1}–${Math.min(start + available, body.length)}/${body.length}` : '';
+  const status = error ? t(language, offline || !state?.connected ? 'readErrorOffline' : 'readError', { error: clean(error) }) :
+    narrow ? `f ${t(language, follow && state?.connected ? 'followShortOn' : 'followShortOff')} ${t(language, offline || !state?.connected ? 'offlineShort' : 'liveShort')}${range}` :
+      `f ${t(language, follow && state?.connected ? 'followOn' : 'followOff')} · ${notice || `${state?.connected ? `● ${t(language, 'connected')}` : `○ ${t(language, 'disconnected')}`}${body.length > available ? `  ${start + 1}–${Math.min(start + available, body.length)}/${body.length}` : ''}`}`;
+  const foot = narrow ? [fit(status, columns), fit('n/p Space/Enter', columns),
+    fit(t(language, tasksView ? 'workerGroupKeys' : 'dagGroupKeys'), columns), fit(t(language, 'detailCloseKeys'), columns)] : ['─'.repeat(columns),
+    fit(status, columns),
+    ...(!tasksView && showCloseHint ? [fit(t(language, 'closeHint'), columns)] : []),
+    ...(tasksView ? [fit(columns < 40 ? 'n/p Space/Enter' : `${t(language, 'nodeControls')}  ${t(language, 'toggleControls')}`, columns),
+      fit(t(language, columns < 40 ? 'workerControlsNarrow' : 'workerControls'), columns)] :
+      [fit(t(language, 'nodeControls'), columns), fit(t(language, 'toggleControls'), columns),
+        fit(`${t(language, 'controls')}  c ${t(language, 'toggleCompleted')}`, columns)])];
   return { text: [...head, ...visible, ...foot].slice(0, rows).join('\n'), scroll: start, nodeRanges, taskRanges, graphRanges };
 }
 

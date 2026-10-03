@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { emitKeypressEvents } from 'node:readline';
 import { createHerdr } from './herdr.mjs';
 import { t } from './i18n.mjs';
-import { fit, renderFrame, runningTarget, standaloneTasks } from './render.mjs';
+import { completedTasks, fit, renderFrame, runningTarget, standaloneTasks } from './render.mjs';
 import { readJson } from './storage.mjs';
 import { TASK_SCOPE, emptyViewState, isExpanded, loadViewState, saveViewState, setExpanded } from './view-state.mjs';
 
@@ -15,7 +15,11 @@ export function renderFixedFrame(state, options, view) {
   if (view === 'dag' && !state?.runs?.length) {
     const head = ['OMO  /  DAG', `DAG (0) - ${t(state?.language, 'none')}`];
     const body = [options.error || '', state?.connected ? t(state?.language, 'waiting') : t(state?.language, 'disconnected')];
-    const foot = [options.error ? t(state?.language, 'readError', { error: options.error }) :
+    const narrow = columns < 40;
+    const status = options.error ? t(state?.language, options.offline || !state?.connected ? 'readErrorOffline' : 'readError', { error: options.error }) :
+      narrow ? `f ${t(state?.language, options.follow && state?.connected ? 'followShortOn' : 'followShortOff')} ${t(state?.language, options.offline || !state?.connected ? 'offlineShort' : 'liveShort')}` :
+      `f ${t(state?.language, options.follow && state?.connected ? 'followOn' : 'followOff')}`;
+    const foot = narrow ? [status, 'n/p Space/Enter', t(state?.language,'dagGroupKeys'), t(state?.language,'detailCloseKeys')] : [options.error ? t(state?.language, options.offline || !state?.connected ? 'readErrorOffline' : 'readError', { error: options.error }) :
       `f ${t(state?.language, options.follow && state?.connected ? 'followOn' : 'followOff')}`,
       t(state?.language, 'nodeControls'), t(state?.language, 'toggleControls'), t(state?.language, 'controls')];
     const lines = [...head, ...body];
@@ -27,8 +31,6 @@ export function renderFixedFrame(state, options, view) {
   const lines = result.text.split('\n');
   lines[0] = fit(`OMO  /  ${view === 'dag' ? 'DAG' : t(state?.language, 'tasks')}`, columns);
   // Ordinary workers have no run selector. No fixed-role footer invites a mode switch.
-  if (view === 'tasks' && lines.length === rows)
-    lines[lines.length - 1] = fit('j/k Scroll  q Close', columns);
   return { ...result, text: lines.join('\n') };
 }
 
@@ -169,6 +171,7 @@ function draw() {
     view === 'tasks' ? selectedTaskId : selectedNodes.get(selectedId)]);
   if (selection !== detailSelection) { verbose = false; detailSelection = selection; }
   const options = { columns: process.stdout.columns ?? 54, rows: process.stdout.rows ?? 48, runIndex, scroll, color: interactive,
+    offline: Boolean(presenceKey && !presenceMessage),
     error, notice: viewError ? t(state?.language, 'viewError', { error: viewError }) : presenceNotice, completedExpanded,
     selectedNodeId: selectedNodes.get(selectedId), selectedTaskId, view, viewState, verbose, revealSelection, follow,
     runningNodeId: running?.nodeId, runningTaskId: running?.taskId };
@@ -265,7 +268,8 @@ process.stdin.on('keypress', (text, pressed) => {
     view = view === 'dag' ? 'tasks' : 'dag';
     scroll = 0; revealSelection = true;
   }
-  if ((key === 'c' || pressed.name === 'c') && (state?.runs?.length ?? 0) > 1) {
+  if ((key === 'c' || pressed.name === 'c') && (view === 'tasks' ? completedTasks(state).length :
+      (state?.runs?.length ?? 0) > 1)) {
     follow = false;
     manual = movedSelection = true;
     completedExpanded = !completedExpanded;

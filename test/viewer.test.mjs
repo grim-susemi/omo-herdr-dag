@@ -28,7 +28,7 @@ test('real standalone PTY respects saved folds, preserves task selection, switch
   await writeJson(`${file}.view.json`, preferences);
   let viewer = openViewer(file, t);
   const fresh = await viewer.frame(text => text.includes('> ● [+] FIRST_DESCRIPTION'));
-  assert.equal(fresh.split('\n').filter(line => line.startsWith('│')).length, 2);
+  assert.equal(fresh.split('\n').filter(line => line.startsWith('│')).length, 1);
   assert.doesNotMatch(fresh, /FIRST_PROGRESS|REAL_MODEL|EXPLICIT_CHILD/);
   const pausedPreferences = await preferenceWritten(file, value => value.navigation?.follow === false,
     () => viewer.frame(text => text.includes('FIRST_PROGRESS'), () => viewer.send({ keys: 'd' })));
@@ -157,7 +157,7 @@ test('real PTY invalid preferences show folded cards without overwriting corrupt
   await writeJson(`${file}.view.json`, invalid);
   const viewer = openViewer(file, t);
   const initial = await viewer.frame(text => text.includes('> ✓ [+] INVALID_PREF_TASK'));
-  assert.equal(initial.split('\n').filter(line => line.startsWith('│')).length, 1);
+  assert.equal(initial.split('\n').filter(line => line.startsWith('│')).length, 0);
   assert.doesNotMatch(initial, /HIDDEN_PROGRESS/);
   await viewer.frame(text => text.includes('HIDDEN_PROGRESS'), () => viewer.send({ keys: 'd' }));
   await viewer.frame(text => text.includes('> ✓ [+] INVALID_PREF_TASK') && !text.includes('HIDDEN_PROGRESS'), () => viewer.send({ keys: 'd' }));
@@ -195,7 +195,8 @@ for (const dag of [false, true]) test(`real ${dag ? 'DAG' : 'standalone'} PTY au
   };
   const check = async (expanded, action, verbose = false) => {
     const text = await verifiedFrame(expanded, verbose, action);
-    if (!verbose) assert.equal(text.split('\n').filter(line => line.startsWith('│')).length, expanded ? 5 : 1);
+    if (!verbose) assert.equal(text.split('\n').filter(line => line.startsWith('│')).length,
+      expanded ? 5 : !dag && task.status === 'completed' ? 0 : 1);
     return text;
   };
   const transition = async (status, expanded, verbose = false) => {
@@ -491,7 +492,7 @@ test('real PTY follow reveals graph work, retains parallel targets, hands off an
   await viewer.frame(text => text.includes('RUN_TARGET_') && text.includes(messages.en.followOn));
   // A queued old-width frame can have the new row count before resize completes.
   const narrow = await viewer.frame(text => text.split('\n').length === 18 && text.includes('RUN_TARGET_') &&
-    text.split('\n').includes('─'.repeat(34)), () => viewer.send({ resize: [18, 35] }));
+    text.split('\n').includes('n/p Space/Enter') && text.split('\n').every(line => width(line) < 35), () => viewer.send({ resize: [18, 35] }));
   assert.ok(narrow.split('\n').every(line => width(line) < 35), narrow);
   assert.doesNotMatch(narrow, /DETAIL_n6|> \[-\] RUN_TARGET/);
   nodes[7].state = 'running';
@@ -600,6 +601,34 @@ for (const view of ['dag', 'tasks']) test(`fixed ${view} retains an active targe
   assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), state);
 });
 
+
+test('workers completed group toggles independently and selected completed details survive updates and restart', { timeout: 25000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(),'task10-group-'));t.after(()=>rm(dir,{recursive:true,force:true}));
+  const file=join(dir,'role.json');
+  const state={sessionId:'group',connected:true,runs:[],tasks:Array.from({length:9},(_,i)=>({id:'t'+i,status:i===8?'running':'completed',description:'GROUP_TASK_'+i,progress:'PROGRESS_'+i}))};
+  await writeJson(file,state);let viewer=openViewer(file,t,['--view','tasks']);
+  await viewer.frame(text=>text.includes('GROUP_TASK_8')&&text.includes('Follow ON'));
+  const group=await viewer.frame(text=>text.includes('Completed tasks (8) [-]')&&text.includes('Follow OFF'),()=>viewer.send({keys:'c'}));
+  assert.match(group,/GROUP_TASK_0/);
+  await viewer.frame(text=>text.includes('Completed tasks (8) [+]'),()=>viewer.send({keys:'c'}));
+  const selected=await viewer.frame(text=>text.includes('> ✓ [+] GROUP_TASK_0'),()=>viewer.send({keys:'n'}));
+  assert.match(selected,/Completed tasks \(8\) \[\+\]/);
+  await viewer.frame(text=>text.includes('PROGRESS_0'),()=>viewer.send({keys:' '}));
+  state.tasks[0].metrics={cost_usd:0,cost_status:'reported',source:'fixture-metrics'};
+  const updated=await viewer.frame(text=>text.includes('$0.0000 [reported]'),()=>writeJson(file,state));
+  assert.match(updated,/PROGRESS_0/);
+  await viewer.frame(text=>text.split('\n').length===18&&text.includes('PROGRESS_0'),()=>viewer.send({resize:[18,40]}));
+  await viewer.close();const saved=JSON.parse(await readFile(file+'.view.json','utf8'));assert.equal(saved.expanded['[null,"t0"]'],true);assert.equal(saved.navigation.completedExpanded,false);
+  viewer=openViewer(file,t,['--view','tasks']);await viewer.frame(text=>text.includes('PROGRESS_0')&&text.includes('Follow OFF'));
+  await viewer.frame(text=>text.includes('Task: t0'),()=>viewer.send({keys:'d'}));
+  await viewer.frame(text=>text.includes('Metrics source: fixture-metrics'),()=>viewer.send({keys:'\x1b[6~'}));
+  await viewer.frame(text=>text.includes('PROGRESS_0')&&!text.includes('Metrics source:'),()=>viewer.send({keys:'d'}));
+  state.tasks[1].status='running';state.tasks[1].progress='REOPENED';
+  await viewer.frame(text=>text.includes('Completed tasks (7)')&&text.includes('REOPENED'),()=>writeJson(file,state));
+  await viewer.frame(text=>text.includes('Follow ON'),()=>viewer.send({keys:'f'}));await viewer.close();
+  assert.deepEqual(JSON.parse(await readFile(file,'utf8')),state);
+});
+
 test('real viewer clock advances elapsed without new snapshots or input', { timeout: 15000 }, async t => {
   const dir = await mkdtemp(join(tmpdir(), 'dag-clock-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -683,7 +712,7 @@ for (const view of ['dag', 'tasks']) test(`fixed ${view} follow keeps auto revea
   await viewer.frame(text => text.includes(selection) && text.includes(messages.en.followOff));
   await viewer.frame(text => text.includes(selection) && text.includes(messages.en.followOff), () => writeJson(file, state));
   const narrow = await viewer.frame(text => text.split('\n').length === 18 && text.includes(messages.en.followOff) &&
-    text.split('\n').includes('─'.repeat(34)), () => viewer.send({ resize: [18, 35] }));
+    text.split('\n').includes('n/p Space/Enter') && text.split('\n').every(line => width(line) < 35), () => viewer.send({ resize: [18, 35] }));
   assert.ok(narrow.split('\n').every(line => width(line) < 35));
   await viewer.close();
   assert.deepEqual(JSON.parse(await readFile(`${file}.view.json`, 'utf8')), saved);

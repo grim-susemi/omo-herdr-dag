@@ -1,4 +1,47 @@
 import assert from 'node:assert/strict';
+
+for(const language of ['en','ko','zh-cn']) for(const view of ['dag','tasks']) for(const columns of [40,24])
+  test(`narrow ${view} keeps current target, live/follow and role controls at ${columns} in ${language}`,()=>{
+    const frame=renderFixedFrame({...state,language},{columns,rows:8,color:false,
+      follow:true,runningNodeId:'first',selectedNodeId:'first',runningTaskId:'st_ordinary'},view);
+    const lines=frame.text.split('\n'), foot=lines.slice(-4).join('\n');
+    assert.match(foot,/ON/);assert.match(foot,/LIVE|연결|在线/);
+    for(const key of ['n/p','Space/Enter','j/k','c','d','q'])assert.ok(foot.includes(key),key+' '+foot);
+    if(view==='dag')assert.ok(lines.slice(0,-4).some(line=>line.includes('ACTUAL_FIRST')||line.includes('ACTUAL_…')));
+    const offline=renderFixedFrame({...state,language},{columns,rows:8,color:false,offline:true,follow:false},view);
+    assert.match(offline.text.split('\n').slice(-4).join('\n'),/OFFLINE|오프라인|离线/);
+    assert.ok(lines.every(line=>width(line)<columns));
+  });
+
+
+for (const view of ['dag', 'tasks']) for (const columns of [80, 29, 24])
+  test(`fixed ${view} keeps read error and offline truth pinned at ${columns} columns`, () => {
+    const frame = renderFixedFrame(state, {columns, rows:14, color:false, error:'BAD_READ',
+      offline:true, scroll:5, follow:false, completedExpanded:true}, view);
+    const foot = frame.text.split('\n').slice(-5).join('\n');
+    assert.match(foot, /Read error/);
+    assert.match(foot, /OFFLINE/);
+    assert.ok(frame.text.split('\n').every(line => width(line) < columns));
+  });
+test('workers viewport suppresses a border-only card edge without changing task ranges', () => {
+  const source = {...state, runs:[], tasks:[
+    {id:'active',status:'running',description:'ACTIVE',progress:'PROGRESS'},
+    {id:'next',status:'pending',description:'NEXT'}]};
+  const frame = renderFixedFrame(source,{columns:80,rows:14,color:false,
+    selectedTaskId:'active'},'tasks');
+  assert.deepEqual(frame.taskRanges.active,{start:0,end:7});
+  assert.deepEqual(frame.taskRanges.next,{start:7,end:10});
+  const body=frame.text.split('\n').slice(2,10);
+  assert.match(body[6], /^╰/);
+  assert.equal(body[7], '');
+  const colored = renderFixedFrame(source,{columns:80,rows:14,color:true,
+    selectedTaskId:'active'},'tasks');
+  assert.equal(colored.text.split('\n')[9], '');
+  const bottomOnly=renderFixedFrame(source,{columns:80,rows:7,color:false,scroll:6},'tasks');
+  assert.equal(bottomOnly.text.split('\n')[2],'');
+  assert.deepEqual(bottomOnly.taskRanges,frame.taskRanges);
+});
+
 import { test } from 'node:test';
 import { renderFixedFrame } from '../src/viewer.mjs';
 import { width } from '../src/render.mjs';
@@ -49,7 +92,7 @@ for (const view of ['dag', 'tasks']) for (const columns of [80, 24])
   test(`fixed ${view} read errors stay visible at ${columns} columns while scrolled`, () => {
     const options = { columns, rows: 14, color: false, scroll: 100, follow: true, error: 'SOURCE_UNAVAILABLE' };
     const frame = renderFixedFrame(state, options, view).text;
-    assert.match(frame.split('\n').at(-4), /^Read error:/);
+    assert.ok(frame.split('\n').slice(-4).some(line => /^Read error:/.test(line)));
     assert.doesNotMatch(frame, /Follow ON.*Connected/);
     assert.ok(frame.split('\n').every(line => width(line) < columns));
     if (view === 'dag') {
@@ -58,6 +101,49 @@ for (const view of ['dag', 'tasks']) for (const columns of [80, 24])
       assert.doesNotMatch(empty, /ORDINARY_ROOT|Tasks|Follow ON/);
     }
   });
+
+
+
+test('completed ordinary roots shrink to unboxed summaries while manual expansion remains visible', () => {
+  const finished = { id: 'done', status: 'completed', description: 'COMPACT_DONE', progress: 'DETAIL_PROGRESS' };
+  const sample = { connected: true, runs: [], tasks: [finished, { id: 'live', status: 'running', description: 'LIVE_ROOT' }] };
+  const folded = renderFixedFrame(sample, { columns: 80, rows: 60, color: false, selectedTaskId: 'done' }, 'tasks');
+  assert.equal(folded.taskRanges.done.end - folded.taskRanges.done.start, 1);
+  assert.doesNotMatch(folded.text, /DETAIL_PROGRESS/);
+  const expanded = renderFixedFrame(sample, { columns: 80, rows: 60, color: false,
+    viewState: { expanded: { '[null,"done"]': true } } }, 'tasks');
+  assert.match(expanded.text, /DETAIL_PROGRESS/);
+  assert.equal(expanded.taskRanges.done.end - expanded.taskRanges.done.start, 7);
+});
+
+test('completed group keeps canonical counts and selected hidden summary reachable', () => {
+  const sample = { connected: true, runs: [], tasks: Array.from({ length: 9 }, (_, i) => ({ id: String(i), status: 'completed', description: 'DONE_'+i })) };
+  const original = structuredClone(sample);
+  const folded = renderFixedFrame(sample, { columns: 80, rows: 60, color: false }, 'tasks');
+  const selected = renderFixedFrame(sample, { columns: 80, rows: 60, color: false, selectedTaskId: '8', revealSelection: true }, 'tasks');
+  const opened = renderFixedFrame(sample, { columns: 80, rows: 60, color: false, completedExpanded: true }, 'tasks');
+  assert.equal(Object.keys(folded.taskRanges).length, 0);
+  assert.equal(Object.keys(selected.taskRanges).length, 1);
+  assert.match(selected.text, /DONE_8/);
+  assert.equal(Object.keys(opened.taskRanges).length, 9);
+  for (const r of Object.values(opened.taskRanges)) assert.equal(r.end-r.start,1);
+  assert.deepEqual(sample, original);
+});
+
+for (const status of ['running','pending','blocked','paused','error','lost']) test('completed parent stays visible with '+status+' descendants', () => {
+  const sample = { connected: true, runs: [], tasks: [{ id:'parent',status:'completed',description:'PROTECTED_PARENT' },
+    { id:'child',parentTaskId:'parent',status,description:'PROTECTED_CHILD' }] };
+  const frame=renderFixedFrame(sample,{columns:80,rows:60,color:false},'tasks');
+  assert.match(frame.text,/PROTECTED_CHILD/);
+  assert.ok(frame.taskRanges.parent.end-frame.taskRanges.parent.start>1);
+});
+
+test('14-row workers fit the entire selected running card including metrics and bottom border', () => {
+  const frame = renderFixedFrame(state,{columns:80,rows:14,color:false,selectedTaskId:'st_ordinary'},'tasks');
+  assert.match(frame.text,/\$0\.4493.*21 tok\/s/);
+  const lines=frame.text.split('\n');
+  assert.ok(lines.findIndex(line=>line.startsWith('╰'))>lines.findIndex(line=>line.includes('21 tok/s')));
+});
 
 const fixedPosixBridge = String.raw`
 

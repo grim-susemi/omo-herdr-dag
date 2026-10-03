@@ -14,7 +14,7 @@ test('running cards show model liveness: phase, time since the last token, stall
   const done = { id: 'st_done', status: 'completed', progress: 'DONE_PROGRESS', activity: activity('text', { text: 'DONE_TAIL' }) };
   const card = (task, options = {}) => {
     const frame = renderFrame({ connected: true, runs: [], tasks: [task] }, { rows: 80, columns: 54, color: false, now, ...options });
-    return frame.text.split('\n').slice(3 + frame.taskRanges[task.id].start, 3 + frame.taskRanges[task.id].end);
+    return frame.text.split('\n').slice(2 + frame.taskRanges[task.id].start, 2 + frame.taskRanges[task.id].end);
   };
   // Tokens arriving now: the newest characters stay visible at the right edge.
   const streaming = card(live);
@@ -154,7 +154,7 @@ test('compact cards share five safe lines, localized counts, selected-only detai
   for (const id of ['root-id', 'other-id']) setExpanded(expanded, TASK_SCOPE, id, true);
   for (const id of ['node', 'missing']) setExpanded(expanded, 'run', id, true);
   const options = { columns: 80, rows: 200, color: false, viewState: expanded, selectedTaskId: 'root-id', now: Date.parse('2026-09-06T00:09:05Z') };
-  const card = (frame, id, kind = 'taskRanges') => frame.text.split('\n').slice(3 + frame[kind][id].start, 3 + frame[kind][id].end);
+  const card = (frame, id, kind = 'taskRanges') => frame.text.split('\n').slice((kind === 'taskRanges' ? 2 : 3) + frame[kind][id].start, (kind === 'taskRanges' ? 2 : 3) + frame[kind][id].end);
   const compact = renderFrame(state, options);
   const lines = card(compact, 'root-id');
   assert.equal(lines.length, 12, 'five root lines and five explicit child lines plus borders');
@@ -232,7 +232,7 @@ test('DAG detail borders identify their node without changing card height or sta
   assert.ok(cleanFrame.text.split('\n')[3 + cleanFrame.nodeRanges[node.id].start].startsWith('╭─ safe node '));
   assert.ok(!cleanFrame.text.includes('\x1b'));
   const standalone = renderFrame(state, { columns: 54, rows: 100, color: false, view: 'tasks' });
-  assert.equal(standalone.text.split('\n')[3 + standalone.taskRanges.standalone.start], `╭${'─'.repeat(51)}╮`);
+  assert.equal(standalone.text.split('\n')[2 + standalone.taskRanges.standalone.start], `╭${'─'.repeat(51)}╮`);
 });
 
 test('automatic card ranges and DAG markers use authoritative status, while booleans and detail remain independent', () => {
@@ -248,7 +248,7 @@ test('automatic card ranges and DAG markers use authoritative status, while bool
       const expanded = preference ?? status === 'running';
       const frame = renderFrame(state, options);
       const range = dag ? frame.nodeRanges.node : frame.taskRanges.task;
-      assert.equal(range.end - range.start, expanded ? 7 : 3);
+      assert.equal(range.end - range.start, expanded ? 7 : !dag && status === 'completed' ? 1 : 3);
       assert.equal(frame.text.includes('PROGRESS_SENTINEL'), expanded);
       assert.equal(frame.text.includes('[+] CARD_SENTINEL'), !expanded);
       if (dag && (status === 'unknown' || status === undefined)) {
