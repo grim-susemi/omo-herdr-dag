@@ -1,5 +1,11 @@
 export const messages = {
   en: {
+    cost: 'Cost', metricUnknown: 'Unknown', reported: 'reported', estimated: 'estimated',
+    input_tokens: 'Input tokens', output_tokens: 'Output tokens', cache_read_tokens: 'Cache read tokens',
+    cache_write_tokens: 'Cache write tokens', total_tokens: 'Total tokens', generation_ms: 'Generation ms',
+    runtime_ms: 'Runtime ms', token_status: 'Token quality', cost_status: 'Cost quality', duration_status: 'Duration source',
+    metricSource: 'Metrics source', collectionPending: 'Collection pending', metricReportedAt: 'Metrics last report',
+    reportedAt: 'Native last report',
     pending: 'Pending', blocked: 'Blocked', scheduled: 'Scheduled', running: 'Running', paused: 'Paused',
     completed: 'Completed', failed: 'Failed', cancelled: 'Cancelled', skipped: 'Skipped',
     error: 'Error', interrupted: 'Interrupted', lost: 'Lost', tasks: 'Tasks', category: 'Category',
@@ -34,6 +40,12 @@ export const messages = {
     activation: 'Start a new OmO session or run /reload',
   },
   ko: {
+    cost: '비용', metricUnknown: '미집계', reported: '보고됨', estimated: '추정',
+    input_tokens: '입력 토큰', output_tokens: '출력 토큰', cache_read_tokens: '캐시 읽기 토큰',
+    cache_write_tokens: '캐시 쓰기 토큰', total_tokens: '전체 토큰', generation_ms: '생성 ms',
+    runtime_ms: '실행 ms', token_status: '토큰 품질', cost_status: '비용 품질', duration_status: '시간 출처',
+    metricSource: '지표 출처', collectionPending: '집계 대기', metricReportedAt: '지표 마지막 보고',
+    reportedAt: '네이티브 마지막 보고',
     pending: '대기', blocked: '의존 대기', scheduled: '배정', running: '실행 중', paused: '일시정지',
     completed: '완료', failed: '실패', cancelled: '취소', skipped: '건너뜀',
     error: '오류', interrupted: '중단', lost: '유실', tasks: '일반 작업', category: '카테고리',
@@ -68,6 +80,12 @@ export const messages = {
     activation: '새 OmO 세션 또는 /reload',
   },
   'zh-cn': {
+    cost: '费用', metricUnknown: '未知', reported: '已报告', estimated: '估算',
+    input_tokens: '输入 token', output_tokens: '输出 token', cache_read_tokens: '缓存读取 token',
+    cache_write_tokens: '缓存写入 token', total_tokens: '总 token', generation_ms: '生成 ms',
+    runtime_ms: '运行 ms', token_status: 'Token 质量', cost_status: '费用质量', duration_status: '时间来源',
+    metricSource: '指标来源', collectionPending: '等待收集', metricReportedAt: '指标最后报告',
+    reportedAt: '原生最后报告',
     pending: '待处理', blocked: '被阻塞', scheduled: '已排期', running: '运行中', paused: '已暂停',
     completed: '已完成', failed: '失败', cancelled: '已取消', skipped: '已跳过',
     error: '错误', interrupted: '已中断', lost: '丢失', tasks: '任务', category: '分类',

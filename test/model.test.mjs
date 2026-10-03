@@ -142,7 +142,7 @@ test('run selector shows at most five rows while keeping the selected run visibl
   assert.doesNotMatch(middle.text, /^\s+RUN_9  /m);
 });
 
-test('compact cards share four safe lines, localized counts, selected-only detail, and temporary collapse override', () => {
+test('compact cards share five safe lines, localized counts, selected-only detail, and temporary collapse override', () => {
   const progress = `PROGRESS_HEAD ${'한글🙂 useful work '.repeat(20)} PROGRESS_TAIL`;
   const state = { connected: true, runs: [], tasks: [
     { id: 'root-id', status: 'running', description: '\x1b[31mROOT_DESCRIPTION\x1b[0m', agent: 'worker', category: 'visual',
@@ -157,12 +157,12 @@ test('compact cards share four safe lines, localized counts, selected-only detai
   const card = (frame, id, kind = 'taskRanges') => frame.text.split('\n').slice(3 + frame[kind][id].start, 3 + frame[kind][id].end);
   const compact = renderFrame(state, options);
   const lines = card(compact, 'root-id');
-  assert.equal(lines.length, 10, 'four root lines and four explicit child lines plus borders');
+  assert.equal(lines.length, 12, 'five root lines and five explicit child lines plus borders');
   assert.match(lines[1], /> ● ROOT_DESCRIPTION/);
   assert.match(lines[2], /worker\/visual · gpt-5.4 \(high\)/);
   assert.match(lines[3], /PROGRESS_HEAD.*…/);
   assert.match(lines[4], /9m 5s · 20 turns · 65 tools/);
-  assert.match(lines[5], /↳ ✓ CHILD_DESCRIPTION/);
+  assert.match(lines[6], /↳ ✓ CHILD_DESCRIPTION/);
   assert.match(card(compact, 'other-id')[1], /× OTHER_DESCRIPTION/);
   assert.doesNotMatch(lines.join('\n'), /root-id|child-id|opencodex\/|PROGRESS_TAIL|2026-09-06/);
   assert.ok(!lines.join('\n').includes('\x1b'));
@@ -171,8 +171,8 @@ test('compact cards share four safe lines, localized counts, selected-only detai
   const full = renderFrame(state, { ...options, verbose: true });
   const fullRoot = card(full, 'root-id').join('\n');
   for (const token of ['root-id', 'PROGRESS_HEAD', 'PROGRESS_TAIL', '2026-09-06T00:00:00Z', 'opencodex/gpt-5.4']) assert.ok(fullRoot.includes(token), token);
-  assert.equal(card(full, 'other-id').length, 6);
-  assert.equal(card(renderFrame(state, { ...options, selectedTaskId: undefined, verbose: true }), 'root-id').length, 10);
+  assert.equal(card(full, 'other-id').length, 7);
+  assert.equal(card(renderFrame(state, { ...options, selectedTaskId: undefined, verbose: true }), 'root-id').length, 12);
   const viewState = emptyViewState('session');
   setExpanded(viewState, TASK_SCOPE, 'root-id', false);
   const saved = structuredClone(viewState);
@@ -195,13 +195,13 @@ test('compact cards share four safe lines, localized counts, selected-only detai
   assert.deepEqual(dagCard.slice(1), lines.slice(1));
   assert.match(dag.text, /node → missing/);
   const missing = card(dag, 'missing', 'nodeRanges');
-  assert.equal(missing.length, 6);
+  assert.equal(missing.length, 7);
   assert.match(missing[1], /○ MISSING_LABEL/);
   assert.doesNotMatch(missing.join('\n'), /undefined|null|NaN|0 turns/);
   for (const columns of [8, 20, 35, 54, 80]) for (const color of [false, true]) {
     const narrow = renderFrame(state, { ...options, columns, color, selectedNodeId: 'node' });
     assert.ok(narrow.text.split('\n').every(line => width(line) < columns));
-    assert.equal(card(narrow, 'node', 'nodeRanges').length, 10);
+    assert.equal(card(narrow, 'node', 'nodeRanges').length, 12);
   }
 });
 
@@ -217,7 +217,7 @@ test('DAG detail borders identify their node without changing card height or sta
     const frame = renderFrame(state, options);
     const range = frame.nodeRanges[node.id];
     const card = frame.text.split('\n').slice(3 + range.start, 3 + range.end);
-    assert.equal(card.length, expanded ? 6 : 3);
+    assert.equal(card.length, expanded ? 7 : 3);
     assert.ok(card[0].startsWith(`╭─ ${fit(label, columns - 7)} `));
     assert.equal(width(card[0]), columns - 1);
     assert.ok(card[0].endsWith('─╮'));
@@ -248,7 +248,7 @@ test('automatic card ranges and DAG markers use authoritative status, while bool
       const expanded = preference ?? status === 'running';
       const frame = renderFrame(state, options);
       const range = dag ? frame.nodeRanges.node : frame.taskRanges.task;
-      assert.equal(range.end - range.start, expanded ? 6 : 3);
+      assert.equal(range.end - range.start, expanded ? 7 : 3);
       assert.equal(frame.text.includes('PROGRESS_SENTINEL'), expanded);
       assert.equal(frame.text.includes('[+] CARD_SENTINEL'), !expanded);
       if (dag && (status === 'unknown' || status === undefined)) {
@@ -427,11 +427,11 @@ test('elapsed duration follows explicit descendants without borrowing the parent
     { id: 'unknown', parentTaskId: 'parent', startedAt: '2026-09-06T00:01:00Z' },
   ] };
   const frame = render(state, { now: Date.parse('2026-09-06T00:02:03Z'), color: false, rows: 100, viewState: { expanded: { '["r","a"]': true } } });
-  const interior = frame.split('\n').filter(line => line.startsWith('│')).slice(-12);
+  const interior = frame.split('\n').filter(line => line.startsWith('│')).slice(-15);
   assert.match(interior[3], /2m 3s/);
-  assert.match(interior[7], /1m 3s/);
-  assert.match(interior[11], /^│\s+-\s+│$/);
-  assert.doesNotMatch(interior[11], /1m 3s|2m 3s/);
+  assert.match(interior[8], /1m 3s/);
+  assert.match(interior[13], /^│\s+-\s+│$/);
+  assert.doesNotMatch(interior[13], /1m 3s|2m 3s/);
 });
 
 test('DAG colors use theme ANSI and not fixed light-gray indexes', () => {

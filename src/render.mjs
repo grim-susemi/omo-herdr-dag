@@ -189,6 +189,40 @@ function elapsedTime(task, { now, connected, updatedAt }, status) {
     .map(value => String(value).padStart(2, '0')).join(':');
 }
 
+const measured = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+function metricSummary(task, language) {
+  const metrics = task?.metrics;
+  const quality = metrics?.cost_status;
+  const knownCost = measured(metrics?.cost_usd) && quality !== 'unavailable' && quality !== 'invalid';
+  const cost = knownCost ? `${metrics.cost_usd > 0 && metrics.cost_usd < 0.0001 ?
+    '<$0.0001' : `$${metrics.cost_usd.toFixed(4)}`} [${t(language, quality === 'reported' || quality === 'estimated' ? quality : 'metricUnknown')}]` :
+    `${t(language, 'cost')}: ${t(language, 'metricUnknown')}`;
+  const native = measured(metrics?.tokens_per_second);
+  const derived = Number.isSafeInteger(metrics?.output_tokens) && metrics.output_tokens >= 0 &&
+    measured(metrics?.generation_ms) && metrics.generation_ms > 0;
+  const rate = native ? metrics.tokens_per_second : derived ? metrics.output_tokens * 1000 / metrics.generation_ms : undefined;
+  const speed = measured(rate) ? `${native ? rate : Math.round(rate)} tok/s${native ? '' : ` [${t(language, 'estimated')}]`}` :
+    `tok/s: ${t(language, 'metricUnknown')}`;
+  return `${cost} · ${speed}`;
+}
+
+function metricLines(task, language) {
+  const metrics = task.metrics;
+  const lines = [metricSummary(task, language)];
+  for (const key of ['input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens', 'total_tokens',
+    'generation_ms', 'runtime_ms']) {
+    const valid = key.endsWith('_tokens') ? Number.isSafeInteger(metrics?.[key]) && metrics[key] >= 0 : measured(metrics?.[key]);
+    lines.push(`${t(language, key)}: ${valid ? metrics[key] : t(language, 'metricUnknown')}`);
+  }
+  for (const key of ['token_status', 'cost_status', 'duration_status']) {
+    lines.push(`${t(language, key)}: ${metrics?.[key] === undefined ? t(language, 'metricUnknown') : clean(metrics[key])}`);
+  }
+  lines.push(`${t(language, 'metricSource')}: ${metrics?.source ? clean(metrics.source) : t(language, 'collectionPending')}`,
+    `${t(language, 'metricReportedAt')}: ${metrics?.reportedAt ? clean(metrics.reportedAt) : t(language, 'metricUnknown')}`,
+    `${t(language, 'reportedAt')}: ${task.reportedAt ? clean(task.reportedAt) : t(language, 'metricUnknown')}`);
+  return lines;
+}
+
 function taskLines(task, language, timing, nodeStatus) {
   const value = key => task?.[key] === undefined || task[key] === null || task[key] === '' ? t(language, 'noData') : clean(task[key]);
   if (!task) return [`${t(language, 'task')}: ${t(language, 'noData')}`];
@@ -205,6 +239,7 @@ function taskLines(task, language, timing, nodeStatus) {
   for (const key of ['startedAt', 'completedAt']) {
     if (task[key] !== undefined && task[key] !== null) lines.push(`${t(language, key)}: ${value(key)}`);
   }
+  lines.push(...metricLines(task, language));
   return lines;
 }
 
@@ -231,6 +266,7 @@ function compactTaskLines(task, language, timing, columns, { selected = false, n
     `${indent}${value(identity)} · ${value(task?.model).replace(/^[^/\s]+\//u, '')}`,
     `${indent}${value(task?.progress)}`,
     `${indent}${stats.join(' · ')}`,
+    `${indent}${metricSummary(task, language)}`,
   ].map((line, index) => {
     const room = Math.max(1, columns - 4);
     const activity = index === 2 && timing.connected ? activitySummary(task, language, timing.now) : null;

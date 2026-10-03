@@ -98,16 +98,17 @@ test('real PTY compact cards expose full selected progress with d without persis
   const expanded = Object.fromEntries(state.tasks.map(task => [JSON.stringify([TASK_SCOPE, task.id]), true]));
   await writeJson(`${file}.view.json`, { version: 1, sessionId: state.sessionId, expanded });
   let viewer = openViewer(file, t);
-  const initial = await viewer.frame(text => text.includes('> ✓ COMPACT_DESCRIPTION'));
+  const initial = await viewer.frame(text => text.includes('> ✓ COMPACT_DESCRIPTION') && text.split('\n').length === 32,
+    () => viewer.send({ resize: [32, 80] }));
   assert.equal(initial.split('\n').filter(line => line.startsWith('╭')).length, 3);
   const interiors = initial.split('\n').filter(line => line.startsWith('│'));
-  assert.equal(interiors.length, 12);
+  assert.equal(interiors.length, 15);
   assert.match(interiors[1], /worker\/visual · gpt-6-astra \(opencodex\)/);
   assert.match(interiors[2], /PROGRESS_HEAD.*…/);
   assert.match(interiors[3], /9분 5초 · 20턴 · 도구 65회/);
-  assert.match(interiors[4], /× SECOND_COMPACT/);
-  assert.match(interiors[8], /\? -/);
-  assert.match(interiors[9], /- · -/);
+  assert.match(interiors[5], /× SECOND_COMPACT/);
+  assert.match(interiors[10], /\? -/);
+  assert.match(interiors[11], /- · -/);
   assert.doesNotMatch(initial, /a-full-id|b-full-id|c-full-id|PROGRESS_TAIL|2026-09-06|opencodex\//);
   await viewer.frame(text => text.split('\n').length === 50, () => viewer.send({ resize: [50, 80] }));
   const full = await viewer.frame(text => text.includes('PROGRESS_TAIL'), () => viewer.send({ keys: 'd' }));
@@ -133,7 +134,7 @@ test('real PTY compact cards expose full selected progress with d without persis
   await viewer.close();
   assert.deepEqual(JSON.parse(await readFile(`${file}.view.json`, 'utf8')).expanded, { ...expanded, '[null,"a-full-id"]': true });
   assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), state);
-  console.log('Compact PTY evidence: three four-line cards, description/status, provider suffix, Korean counts, ellipsis, full progress/times, d on/off, selection reset, collapsed peek, restart without verbose persistence.');
+  console.log('Compact PTY evidence: three five-line cards including metrics, description/status, provider suffix, Korean counts, ellipsis, full progress/times, d on/off, selection reset, collapsed peek, restart without verbose persistence.');
 });
 
 test('real PTY invalid preferences show folded cards without overwriting corrupt preferences', { timeout: 15000 }, async t => {
@@ -174,7 +175,7 @@ for (const dag of [false, true]) test(`real ${dag ? 'DAG' : 'standalone'} PTY au
     (!dag || text.includes(`[${expanded ? '-' : '+'}] AUTO_NODE`));
   const check = async (expanded, action, verbose = false) => {
     const text = await viewer.frame(matches(expanded, verbose), action);
-    if (!verbose) assert.equal(text.split('\n').filter(line => line.startsWith('│')).length, expanded ? 4 : 1);
+    if (!verbose) assert.equal(text.split('\n').filter(line => line.startsWith('│')).length, expanded ? 5 : 1);
     return text;
   };
   const transition = async (status, expanded, verbose = false) => {

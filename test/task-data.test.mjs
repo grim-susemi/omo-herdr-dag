@@ -29,6 +29,7 @@ test('actual RPC fields normalize to a bounded whitelist with ISO timestamps and
     spawn_spec: { prompt: 'PRIVATE PROMPT' }, final_response: 'PRIVATE OUTPUT' })), {
     id: 'st_root', description: 'Investigate', agent: 'explore', model: 'provider/model', status: 'running',
     startedAt: '2026-09-06T00:00:00.000Z', progress: '[bash] LATEST_PROGRESS_EXCERPT', turns: 0, toolCalls: 3,
+    reportedAt: '2026-09-06T00:00:01.000Z',
   });
   assert.deepEqual(normalizeTask({ task_id: 'st_missing' }), { id: 'st_missing' });
   assert.equal(normalizeTask({ task_id: '../escape' }), null);
