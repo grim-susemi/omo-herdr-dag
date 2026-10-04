@@ -28,9 +28,14 @@ test('execution colors emphasize unselected graph and task titles, borders and s
   const standalone = renderFrame(state, { columns: 35, rows: 200, color: true, selectedTaskId: 'completed' });
   for (const [id, color] of Object.entries(colors)) {
     const range = standalone.taskRanges[id];
-    const card = standalone.text.split('\n').slice(3 + range.start, 3 + range.end);
-    assert.ok(card[0].startsWith(`\x1b[${color}m╭`), id);
-    assert.ok(card[1].includes(`\x1b[${color}m${id === 'completed' ? '>' : ' '}`), id);
+    const card = standalone.text.split('\n').slice(2 + range.start, 2 + range.end);
+    if (id === 'completed') {
+      assert.equal(range.end-range.start,1);
+      assert.ok(card[0].includes(`\x1b[${color}m> ✓ [+] T_completed`),id);
+    } else {
+      assert.ok(card[0].startsWith(`\x1b[${color}m╭`), id);
+      assert.ok(card[1].includes(`\x1b[${color}m `), id);
+    }
     if (id === 'completed') assert.ok(!card.join('\n').includes('\x1b[36m'));
   }
   assert.ok(!renderFrame(state, { color: false, rows: 200 }).text.includes('\x1b'));
@@ -124,7 +129,7 @@ test('standalone follow reveals the running card without changing selection; dis
     assert.ok(frame.scroll > 0 && frame.scroll <= frame.taskRanges.z.start);
     assert.ok(frame.text.includes('TASK_z'));
     assert.ok(!frame.text.includes('> ● TASK_z'));
-    assert.ok(frame.text.includes(messages[language].followOn));
+    assert.ok(frame.text.includes(messages[language].followShortOn));
     assert.ok(frame.text.split('\n').every(line => width(line) < 35));
     const disconnected = renderFrame({ ...state, connected: false }, { rows: 80, columns: 54, color: false, language, now: 1000 });
     assert.ok(disconnected.text.includes(messages[language].followOff));

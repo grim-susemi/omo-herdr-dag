@@ -7,12 +7,16 @@ import { execFileSync } from 'node:child_process';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const temp = await mkdtemp(join(tmpdir(), 'omo-dag-package-test-'));
-const env = { ...process.env, npm_config_cache: join(temp, 'npm-cache'), npm_config_update_notifier: 'false' };
+const env = { ...{ ...process.env, HOME: join(temp, 'home'), USERPROFILE: join(temp, 'home'), OMO_CODING_AGENT_DIR: join(temp, 'default-agent'), SENPI_CODING_AGENT_DIR: join(temp, 'default-agent'), PI_CODING_AGENT_DIR: join(temp, 'default-agent'), npm_config_cache: join(temp, 'npm-cache') }, npm_config_update_notifier: 'false' };
 // npm run exports the user's global script allowlist as an environment option;
 // npm 12 rejects that option for this isolated local install. Scripts stay disabled.
 for (const key of Object.keys(env)) if (key.toLowerCase() === 'npm_config_allow_scripts') delete env[key];
 const npmCli = process.env.npm_execpath ?? join(dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js');
 const run = (program, args, cwd = root) => {
+  for (const key of ['HOME', 'USERPROFILE', 'OMO_CODING_AGENT_DIR', 'SENPI_CODING_AGENT_DIR', 'PI_CODING_AGENT_DIR', 'npm_config_cache']) {
+    const scoped = resolve(env[key]);
+    assert.ok(scoped.startsWith(resolve(temp) + (process.platform === 'win32' ? '\\' : '/')), `${key} escaped fixture`);
+  }
   // npm.cmd cannot be passed to execFile on Windows. Invoke npm's JS entry
   // directly, preserving argv without introducing another command shell.
   const windowsNpm = process.platform === 'win32' && program === 'npm';

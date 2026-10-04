@@ -18,9 +18,11 @@ async function fixture(t) {
   await cp(join(root, 'LICENSE'), join(source, 'LICENSE'));
   await writeFile(join(source, 'extension.mjs'), "import {version} from './src/probe.mjs';\nexport default pi => pi.registerCommand('probe', {description: String(version), handler: async () => {}});\n");
   await writeFile(join(source, 'src/probe.mjs'), 'export const version = 1;\n');
+  const env = { ...process.env, HOME: join(temp, 'home'), USERPROFILE: join(temp, 'home'), OMO_CODING_AGENT_DIR: agent, SENPI_CODING_AGENT_DIR: agent, PI_CODING_AGENT_DIR: agent, npm_config_cache: join(temp, 'npm-cache') };
+  for (const key of ['HOME', 'USERPROFILE', 'OMO_CODING_AGENT_DIR', 'SENPI_CODING_AGENT_DIR', 'PI_CODING_AGENT_DIR', 'npm_config_cache']) assert.ok(env[key].startsWith(temp + (process.platform === 'win32' ? '\\' : '/')), key + ' escaped fixture');
   const install = (...args) => JSON.parse(execFileSync(process.execPath,
-    [join(source, 'scripts/install.mjs'), '--agent-dir', agent, ...args], { encoding: 'utf8' }));
-  return { temp, source, agent, install };
+    [join(source, 'scripts/install.mjs'), '--agent-dir', agent, ...args], { env, encoding: 'utf8' }));
+  return { temp, source, agent, install, env };
 }
 
 test('each install has unique dependency paths, with retained generations, locale and stable runtime records', async t => {
@@ -120,15 +122,19 @@ test('a managed herdr-dag.js loader is removed and a foreign one is kept', async
 // Explicit integration target; the ordinary package tests do not require OmO or Bun.
 // OMO_TEST_SENPI_ROOT=/path/to/omo-ai OMO_TEST_BUN=/path/to/bun node --test test/install-reload.test.mjs
 if (process.env.OMO_TEST_SENPI_ROOT) test('real Bun Senpi loader sees changed transitive code after reinstall in the same process', async t => {
-  const { source, agent } = await fixture(t);
+  const { source, agent, env } = await fixture(t);
   const probe = async () => {
     const assert = (await import('node:assert/strict')).default;
     const { execFileSync } = await import('node:child_process');
     const { writeFile } = await import('node:fs/promises');
     const { join } = await import('node:path');
     const { pathToFileURL } = await import('node:url');
-    const { loadExtensions, clearExtensionCache } = await import(pathToFileURL(join(process.env.OMO_TEST_SENPI_ROOT,
-      'node_modules/@code-yeongyu/senpi/dist/core/extensions/loader.js')));
+    const { existsSync } = await import('node:fs');
+    const declared = process.env.OMO_TEST_SENPI_ROOT;
+    const sdkRoot = existsSync(join(declared, 'dist/core/extensions/loader.js')) ? declared :
+      join(declared, 'node_modules/@code-yeongyu/senpi');
+    const { loadExtensions, clearExtensionCache } = await import(pathToFileURL(join(sdkRoot,
+      'dist/core/extensions/loader.js')));
     const source = process.env.PROBE_SOURCE, agent = process.env.PROBE_AGENT;
     const install = () => JSON.parse(execFileSync(process.execPath,
       [join(source, 'scripts/install.mjs'), '--agent-dir', agent], { encoding: 'utf8' }));
@@ -148,6 +154,6 @@ if (process.env.OMO_TEST_SENPI_ROOT) test('real Bun Senpi loader sees changed tr
     console.log(JSON.stringify({ first: first.integration, second: second.integration, afterReload }));
   };
   const output = execFileSync(process.env.OMO_TEST_BUN ?? 'bun', ['--eval', `(${probe.toString()})()`],
-    { env: { ...process.env, PROBE_SOURCE: source, PROBE_AGENT: agent }, encoding: 'utf8', timeout: 20000 });
+    { env: { ...env, PROBE_SOURCE: source, PROBE_AGENT: agent }, encoding: 'utf8', timeout: 20000 });
   assert.equal(JSON.parse(output).afterReload, '2');
 });

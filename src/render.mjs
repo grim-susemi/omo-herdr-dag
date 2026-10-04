@@ -319,7 +319,7 @@ function taskCard(task, tasks, columns, color, language, timing, { selected, exp
   const text = detailed ? [compact[0], ...(node ? [`${clean(node.label)} (${clean(node.id)})`, `${icons[node.state]} ${t(language, node.state)}`] : []),
     ...taskLines(task, language, timing, node?.state)] : expanded ? compact : compact.slice(0, 1);
   if (expanded || detailed) text.push(...descendantLines(task, tasks, language, timing, columns));
-  return compactCompleted && !expanded && !detailed ? [fit(compact[0], columns)] :
+  return compactCompleted && !expanded && !detailed ? [paint(fit(compact[0], columns), colors[task?.status], color)] :
     detailBox(text, columns, color, node?.state ?? task?.status, node?.label ?? node?.id);
 }
 

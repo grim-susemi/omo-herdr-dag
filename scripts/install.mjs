@@ -6,8 +6,22 @@ import { fileURLToPath } from 'node:url';
 import { languageOf, t } from '../src/i18n.mjs';
 
 const source = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const agentDir = resolve(process.argv.includes('--agent-dir') ? process.argv[process.argv.indexOf('--agent-dir') + 1]
-  : process.env.OMO_CODING_AGENT_DIR || process.env.SENPI_CODING_AGENT_DIR || join(homedir(), '.omo', 'agent'));
+const args = process.argv.slice(process.argv[2] === 'install' ? 3 : 2);
+const seen = new Set();
+for (let i = 0; i < args.length; i++) {
+  const key = args[i];
+  if (!['--agent-dir', '--lang', '--dry-run'].includes(key) || seen.has(key)) throw new Error('Invalid or duplicate option: '+key);
+  seen.add(key);
+  if (key !== '--dry-run') {
+    if (!args[i+1] || args[i+1].startsWith('-')) throw new Error(key+' requires a value.');
+    if (key === '--lang' && !['en','ko','zh-cn'].includes(args[i+1])) throw new Error('--lang must be en, ko, or zh-cn.');
+    i++;
+  }
+}
+const agentDir = resolve(seen.has('--agent-dir') ? args[args.indexOf('--agent-dir')+1] :
+  process.env.OMO_CODING_AGENT_DIR || process.env.SENPI_CODING_AGENT_DIR || join(homedir(),'.omo','agent'));
+const required = ['extension.mjs', 'LICENSE', "src/viewer.mjs", "src/view-state.mjs", "src/task-data.mjs", "src/stream-tap.mjs", "src/storage.mjs", "src/runtime.mjs", "src/retention.mjs", "src/render.mjs", "src/model.mjs", "src/i18n.mjs", "src/herdr.mjs", "src/controller.mjs"];
+for (const file of required) await readFile(join(source,file));
 const container = join(agentDir, 'herdr-dag', 'integration');
 const entry = 'omo-herdr-dag.js';
 const wrapper = join(agentDir, 'extensions', entry);
@@ -26,6 +40,10 @@ if (currentText !== undefined && (typeof current !== 'string' || !/^generation-\
   throw new Error(`Invalid installation generation: ${container}`);
 }
 const previous = current ? join(container, current) : container;
+if (current) {
+  if ((await optionalText(join(previous,'.installed-by'))) !== marker) throw new Error('Interrupted installation generation: '+previous);
+  for (const file of required) await readFile(join(previous,file));
+}
 let savedLanguage;
 try { savedLanguage = JSON.parse(await readFile(join(previous, 'locale.json'), 'utf8')).language; }
 catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -54,6 +72,14 @@ await mkdir(dirname(container), { recursive: true, mode: 0o700 });
 await mkdir(dirname(wrapper), { recursive: true, mode: 0o700 });
 const stamp = randomUUID();
 const staged = `${container}.stage-${stamp}`;
+const wrapperBefore = await optionalText(wrapper);
+let migrated = false, promoted = false, currentReplaced = false, wrapperReplaced = false;
+async function restore(path, text) {
+  if (text === undefined) return rm(path, { force: true });
+  const temporary = `${path}.rollback-${stamp}`;
+  try { await writeFile(temporary, text, { mode: 0o600 }); await rename(temporary, path); }
+  finally { await rm(temporary, { force: true }); }
+}
 await mkdir(staged, { mode: 0o700 });
 try {
   await cp(join(source, 'src'), join(staged, 'src'), { recursive: true });
@@ -62,17 +88,26 @@ try {
   await writeFile(join(staged, 'locale.json'), JSON.stringify({ language }) + '\n', { mode: 0o600 });
   await writeFile(join(staged, '.installed-by'), marker, { mode: 0o600 });
   // Migrate the original flat installation without touching sibling runtime files.
-  if (entries && !current) await rename(container, backup);
+  if (entries && !current) { await rename(container, backup); migrated = true; }
   await mkdir(container, { recursive: true, mode: 0o700 });
   await writeFile(join(container, '.installed-by'), marker, { mode: 0o600 });
-  await rename(staged, integration);
+  await rename(staged, integration); promoted = true;
   await writeFile(join(container, `current.json.tmp-${stamp}`), JSON.stringify({ generation }) + '\n', { mode: 0o600 });
-  await rename(join(container, `current.json.tmp-${stamp}`), join(container, 'current.json'));
+  await rename(join(container, `current.json.tmp-${stamp}`), join(container, 'current.json')); currentReplaced = true;
   const text = `${marker}\nexport { default } from '../herdr-dag/integration/${generation}/extension.mjs';\n`;
   await writeFile(`${wrapper}.tmp-${stamp}`, text, { mode: 0o600 });
-  await rename(`${wrapper}.tmp-${stamp}`, wrapper);
+  await rename(`${wrapper}.tmp-${stamp}`, wrapper); wrapperReplaced = true;
   if (legacyExtension) await rm(legacyExtension);
+} catch (error) {
+  if (wrapperReplaced) await restore(wrapper, wrapperBefore);
+  if (currentReplaced) await restore(join(container, 'current.json'), currentText);
+  if (promoted) await rm(integration, { recursive: true, force: true });
+  if (migrated) { await rm(container, { recursive: true, force: true }); await rename(backup, container); }
+  else if (!entries) await rm(container, { recursive: true, force: true });
+  throw error;
 } finally {
+  await rm(`${wrapper}.tmp-${stamp}`, { force: true });
+  await rm(join(container, `current.json.tmp-${stamp}`), { force: true });
   await rm(staged, { recursive: true, force: true });
 }
 console.log(JSON.stringify({ installed: true, ...plan }, null, 2));

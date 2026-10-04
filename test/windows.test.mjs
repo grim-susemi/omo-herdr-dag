@@ -44,7 +44,8 @@ for (const primary of ['OMO_CODING_AGENT_DIR', 'SENPI_CODING_AGENT_DIR']) {
     t.after(() => rm(directory, { recursive: true, force: true }));
     const active = join(directory, "active owner's root"), explicit = join(directory, 'explicit');
     const env = { ...process.env, HOME: directory, USERPROFILE: directory,
-      OMO_CODING_AGENT_DIR: '', SENPI_CODING_AGENT_DIR: join(directory, 'senpi') };
+      OMO_CODING_AGENT_DIR: '', SENPI_CODING_AGENT_DIR: join(directory, 'senpi'),
+      PI_CODING_AGENT_DIR: join(directory, 'pi'), npm_config_cache: join(directory, 'npm-cache') };
     env[primary] = active;
     const install = (...args) => JSON.parse(execFileSync(process.execPath,
       [fileURLToPath(new URL('../scripts/install.mjs', import.meta.url)), ...args], { env, encoding: 'utf8' }));
