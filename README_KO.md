@@ -2,6 +2,8 @@
 
 **OmO workflow DAG를 Herdr 옆 pane에서 실시간으로 확인하세요.**
 
+통합 확장 `omo-herdr-dashboard.js`에서는 `/dashboard` 하나로 Todo·일반 작업·DAG를 함께 열고 다시 엽니다. 현황판 왼쪽은 Todo와 일반 작업을 위아래로 배치하고, 오른쪽 DAG는 전체 높이를 사용합니다. 대화는 전체 너비의 40%를 유지합니다.
+
 [English](README.md) | 한국어 | [简体中文](README_ZH.md)
 
 `omo-herdr-dag`는 workflow DAG가 생성되면 [Herdr](https://herdr.dev/)에 전용 TUI를 여는 [OmO](https://github.com/code-yeongyu/oh-my-openagent) 확장입니다. 대화 옆에서 노드 상태와 의존 관계를 확인할 수 있으며, 포커스는 기존 pane에 유지합니다.

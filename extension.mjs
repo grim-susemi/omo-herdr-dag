@@ -96,8 +96,8 @@ export default function extension(pi) {
     void owner.rebase().then(() => owner.coordinator?.schedule()).catch(() => {});
   });
   pi.on('session_shutdown', stop);
-  pi.registerCommand('dag-pane', {
-    description: t(language, 'commandDescription'),
+  pi.registerCommand('dashboard', {
+    description: 'Open or reopen the Todo, worker and DAG dashboard.',
     handler: async (_args, ctx) => {
       if (!eligible(ctx) || !controller) return;
       await controller.open().catch(() => {});

@@ -16,6 +16,22 @@ export function viewKey(socket, pane, session) {
   return createHash('sha256').update(JSON.stringify([socket, pane, session])).digest('hex').slice(0, 24);
 }
 
+export function isColumnDashboard(layout, ids) {
+  if (!layout?.area || layout.panes?.length !== 4 || new Set(Object.values(ids)).size !== 4) return false;
+  const rects = Object.fromEntries(Object.entries(ids).map(([role, id]) => {
+    const matches = layout.panes.filter(pane => pane.pane_id === id);
+    return [role, matches.length === 1 ? matches[0].rect : null];
+  }));
+  const { parent, todo, workers, dag } = rects, area = layout.area;
+  if (![parent, todo, workers, dag, area].every(rect => rect &&
+    ['x', 'y', 'width', 'height'].every(key => Number.isFinite(rect[key])) && rect.width > 0 && rect.height > 0)) return false;
+  return parent.x === area.x && parent.y === area.y && parent.height === area.height &&
+    todo.x === parent.x + parent.width && todo.y === area.y &&
+    workers.x === todo.x && workers.width === todo.width && workers.y === todo.y + todo.height &&
+    todo.height + workers.height === area.height && dag.x === todo.x + todo.width &&
+    dag.y === area.y && dag.height === area.height && dag.x + dag.width === area.x + area.width;
+}
+
 export function dagTitle(sessionId) {
   return `DAG · ${sessionId.slice(0, 8)}`;
 }
@@ -392,6 +408,7 @@ export class FixedDagPane extends DagPane {
         if (!this.stopped && sameOwner(coordinator?.binding, this.binding)) this.coordinator = coordinator;
       },
       openPair: options => this.openPair(options),
+      arrangeDashboard: () => this.arrangeDashboard(),
       setOffers: offers => this.setOffers(offers), inspectPair: () => this.inspectPair(),
       subscribeSource: callback => {
         this.sourceEvents.on('source', callback);
@@ -571,6 +588,15 @@ export class FixedDagPane extends DagPane {
         throw new Error('layout-waiting: stale or foreign Todo anchor');
       if (todo) await this.membership(todo.paneId);
       const existing = await this.inspectPair();
+      if (this.claim.layout === 'columns') {
+        const dag = await this.ensureRole('dag', existing.workers?.paneId ?? todo?.paneId ?? this.parentPane,
+          'right', existing.workers || todo ? '0.5' : '0.4', parent.tabId, force);
+        if (!dag) return {};
+        const workers = await this.ensureRole('workers', todo?.paneId ?? dag.paneId,
+          todo ? 'down' : 'right', '0.5', parent.tabId, force, todo ? null : dag.paneId);
+        this.status = workers ? 'current' : 'layout-waiting';
+        return { dag, workers };
+      }
       if (!existing.dag && existing.workers && todo) {
         // Closing the top DAG collapses the right-hand tree to workers/Todo
         // at 50/50. Restore their owned boundary before inserting the DAG.
@@ -707,6 +733,61 @@ export class FixedDagPane extends DagPane {
       throw error;
     } finally { abort.abort(); }
   }
+  arrangeDashboard() {
+    return this.enqueue(async () => {
+      if (this.stopped || this.claim?.layout !== 'columns') return;
+      const pair = await this.inspectPair(), todo = await this.coordinator?.inspectTodo?.();
+      if (!pair.dag || !pair.workers || !todo) return;
+      const tabId = this.claim.tabId;
+      if (!sameOwner(todo, this.binding) || todo.scopeEpoch !== this.scopeEpoch || todo.ready !== true ||
+        todo.manualClose || todo.tabId !== tabId) throw new Error('layout-waiting: invalid Todo placement owner');
+      const ids = { parent: this.parentPane, todo: todo.paneId, workers: pair.workers.paneId, dag: pair.dag.paneId };
+      const geometry = async () => (await this.herdr('layout', '--pane', this.parentPane))?.layout;
+      const layout = await geometry();
+      if (isColumnDashboard(layout, ids)) return;
+      // Moving a pane collapses its old branch. A foreign pane must never be
+      // resized as an incidental result of that collapse.
+      if (layout?.tab_id !== tabId || layout.panes?.length !== 4 ||
+        layout.panes.some(pane => !Object.values(ids).includes(pane.pane_id)))
+        throw new Error('layout-waiting: dashboard region contains unowned panes');
+      for (const id of Object.values(ids)) await this.membership(id);
+      const selected = await this.placementFocus(tabId, todo.paneId);
+      const guard = async () => {
+        if (this.stopped || await this.placementFocus(tabId, todo.paneId) !== selected)
+          throw new Error('layout-waiting: input selection changed during placement');
+        if (!await this.verify(pair.dag) || !await this.verify(pair.workers) ||
+          (await this.coordinator.inspectTodo())?.paneId !== todo.paneId)
+          throw new Error('layout-waiting: dashboard owner changed during placement');
+      };
+      const move = async (id, target, direction) => {
+        await guard();
+        await this.herdr('move', id, '--tab', tabId, '--target-pane', target, '--split', direction, '--no-focus');
+        await guard();
+      };
+      const swap = async (id, target) => {
+        await guard();
+        await this.herdr('swap', '--source-pane', id, '--target-pane', target);
+        await this.restorePlacementFocus(id, selected, tabId, todo.paneId);
+        await guard();
+      };
+      await move(ids.dag, ids.parent, 'right');
+      await move(ids.workers, ids.dag, 'right');
+      await swap(ids.workers, ids.dag);
+      await move(ids.todo, ids.workers, 'down');
+      await swap(ids.todo, ids.workers);
+      const placed = await geometry();
+      if (!isColumnDashboard(placed, ids)) throw new Error('layout-waiting: dashboard column placement mismatch');
+      const parent = placed.panes.find(pane => pane.pane_id === ids.parent).rect;
+      const desired = Math.round(placed.area.width * .4);
+      if (parent.width !== desired) {
+        await guard();
+        await this.herdr('resize', '--pane', ids.parent, '--direction', parent.width > desired ? 'left' : 'right',
+          '--amount', String(Math.abs(parent.width - desired) / placed.area.width));
+      }
+      const final = await geometry();
+      if (!isColumnDashboard(final, ids)) throw new Error('layout-waiting: dashboard resize mismatch');
+    });
+  }
   async placementFocus(tabId, anchor) {
     const panes = (await this.herdr('list'))?.panes ?? [];
     const selected = panes.filter(pane => pane.focused);
@@ -758,7 +839,7 @@ export class FixedDagPane extends DagPane {
     }
   }
   open() {
-    return this.coordinator ? this.coordinator.schedule({ forceRoles: ['dag', 'workers'] }) : this.openPair({ force: true });
+    return this.coordinator ? this.coordinator.schedule({ forceRoles: ['dag', 'workers', 'todo'] }) : this.openPair({ force: true });
   }
   rebase() {
     return this.enqueue(async () => {
