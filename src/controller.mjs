@@ -643,6 +643,7 @@ export class FixedDagPane extends DagPane {
       }
     } else if (record?.attempted && !force) return;
     await this.membership(anchor);
+    const focusBefore = beforePane ? await this.placementFocus(tabId, beforePane) : null;
     if (typeof this.node === 'function') this.node = await this.node();
     const launchToken = randomBytes(24).toString('hex');
     record = { schema: 'omo-herdr-dashboard/pane/1', ...this.binding, scopeEpoch: this.scopeEpoch,
@@ -655,14 +656,27 @@ export class FixedDagPane extends DagPane {
     if (!result?.pane?.pane_id) throw new Error('Owned fixed-role split returned no pane ID');
     record.paneId = result.pane.pane_id;
     await this.membership(record.paneId);
-    if (beforePane) {
-      await this.membership(beforePane);
-      await this.herdr('swap', '--source-pane', record.paneId, '--target-pane', beforePane);
-    }
     const createdInfo = await this.herdr('process-info', '--pane', record.paneId);
     record.creationProcessId = createdInfo?.process_info?.shell_pid;
     const shell = await observePaneShell(createdInfo, record, this.inspectShell);
     if (shell) record.creationDate = shell.shell.CreationDate;
+    if (beforePane) {
+      try {
+        const current = await this.placementFocus(tabId, beforePane);
+        if (current !== focusBefore) throw new Error('layout-waiting: input selection changed before placement');
+        await this.herdr('swap', '--source-pane', record.paneId, '--target-pane', beforePane);
+        await this.restorePlacementFocus(record.paneId, focusBefore, tabId, beforePane);
+      } catch (error) {
+        const selected = (await this.herdr('list'))?.panes?.filter(pane => pane.focused);
+        if (selected?.length === 1 && selected[0].pane_id !== record.paneId &&
+          await canCleanupPane(await this.herdr('process-info', '--pane', record.paneId), record, this.inspectShell)) {
+          await this.membership(record.paneId); await this.herdr('close', record.paneId); record.paneId = null;
+        }
+        record.failed = true;
+        await this.roleWrite(() => writeJson(this.paneFile(role), record));
+        throw error;
+      }
+    }
     this.records.set(role, record);
     await this.roleWrite(async () => {
       await writeJson(this.paneFile(role), record);
@@ -692,6 +706,56 @@ export class FixedDagPane extends DagPane {
       }
       throw error;
     } finally { abort.abort(); }
+  }
+  async placementFocus(tabId, anchor) {
+    const panes = (await this.herdr('list'))?.panes ?? [];
+    const selected = panes.filter(pane => pane.focused);
+    const layout = (await this.herdr('layout', '--pane', anchor))?.layout;
+    if (selected.length !== 1 || selected[0].tab_id !== tabId || layout?.tab_id !== tabId ||
+      selected[0].pane_id !== layout.focused_pane_id)
+      throw new Error('layout-waiting: placement requires the selected owned tab');
+    const id = selected[0].pane_id;
+    await this.membership(id);
+    await this.verifyInputPane(id, anchor, tabId);
+    return id;
+  }
+  async verifyInputPane(id, anchor, tabId) {
+    if (id === this.parentPane || id === anchor) return;
+    const record = [...this.records.values()].find(value => value.paneId === id && !value.manualClose);
+    if (record && await this.verify(record)) return;
+    const todo = await this.coordinator?.inspectTodo?.();
+    if (todo && sameOwner(todo, this.binding) && todo.role === 'todo' && todo.paneId === id &&
+      todo.tabId === tabId && todo.scopeEpoch === this.scopeEpoch && todo.ready === true && !todo.manualClose) return;
+    throw new Error('layout-waiting: unverified input pane');
+  }
+  async restorePlacementFocus(created, original, tabId, anchor) {
+    let source = created;
+    for (let step = 0; step < 3 && source !== original; step++) {
+      const panes = (await this.herdr('list'))?.panes ?? [];
+      const selected = panes.filter(pane => pane.focused);
+      if (selected.length !== 1 || selected[0].pane_id !== source || selected[0].tab_id !== tabId) return;
+      await this.membership(source); await this.membership(original);
+      await this.verifyInputPane(original, anchor, tabId);
+      const layout = (await this.herdr('layout', '--pane', source))?.layout;
+      const rect = id => layout?.panes?.filter(pane => pane.pane_id === id);
+      const from = rect(source), to = rect(original);
+      if (layout?.tab_id !== tabId || layout.focused_pane_id !== source || from?.length !== 1 || to?.length !== 1)
+        throw new Error('layout-waiting: ambiguous focus restoration geometry');
+      const a = from[0].rect, b = to[0].rect;
+      if (![a, b].every(value => value && ['x', 'y', 'width', 'height'].every(key => Number.isFinite(value[key]))))
+        throw new Error('layout-waiting: invalid focus restoration geometry');
+      const direction = b.x < a.x ? 'left' : b.x > a.x ? 'right' : b.y < a.y ? 'up' : 'down';
+      const neighbor = (await this.herdr('neighbor', '--pane', source, '--direction', direction))?.neighbor;
+      const next = neighbor?.neighbor_pane_id;
+      if (!next || neighbor.layout?.tab_id !== tabId || neighbor.layout.focused_pane_id !== source)
+        throw new Error('layout-waiting: missing focus restoration neighbor');
+      await this.membership(next);
+      await this.verifyInputPane(next, anchor, tabId);
+      const fresh = ((await this.herdr('list'))?.panes ?? []).filter(pane => pane.focused);
+      if (fresh.length !== 1 || fresh[0].pane_id !== source || fresh[0].tab_id !== tabId) return;
+      await this.herdr('focus', '--pane', source, '--direction', direction);
+      source = next;
+    }
   }
   open() {
     return this.coordinator ? this.coordinator.schedule({ forceRoles: ['dag', 'workers'] }) : this.openPair({ force: true });

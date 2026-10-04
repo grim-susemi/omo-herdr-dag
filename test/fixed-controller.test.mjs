@@ -70,9 +70,15 @@ async function setup(t) {
   const panes = new Map([['qa:parent', { pane_id: 'qa:parent', tab_id: 'qa:tab' }]]);
   const processes = new Map();
   let number = 0;
+  let focused = 'qa:parent';
   const herdr = async (...args) => {
     calls.push(args);
-    if (args[0] === 'list') return { panes: [...panes.values()] };
+    if (args[0] === 'list') return { panes: [...panes.values()].map(pane => ({ ...pane, focused: pane.pane_id === focused })) };
+    if (args[0] === 'layout') return { layout: { tab_id: 'qa:tab', focused_pane_id: focused,
+      panes: [...panes.values()].map((pane, index) => ({ ...pane, rect: { x: index ? 100 : 0, y: index ? index * 10 : 0, width: 50, height: 10 } })) } };
+    if (args[0] === 'swap') { focused = args[2]; return {}; }
+    if (args[0] === 'neighbor') return { neighbor: { neighbor_pane_id: 'qa:parent', layout: { tab_id: 'qa:tab', focused_pane_id: focused } } };
+    if (args[0] === 'focus') { focused = 'qa:parent'; return {}; }
     if (args[0] === 'split') {
       const pane_id = `qa:role${++number}`;
       panes.set(pane_id, { pane_id, tab_id: 'qa:tab' }); return { pane: { pane_id } };
@@ -107,8 +113,48 @@ async function setup(t) {
     console.log(JSON.stringify({ event: 'resource-cleaned', pid: process.pid, directory,
       controlPipes: controllers.map(owner => owner.controlPath) }));
   });
-  return { directory, calls, warnings, events, panes, processes, options, controller, controllers };
+  return { directory, calls, warnings, events, panes, processes, options, controller, controllers,
+    get focused() { return focused; }, set focused(value) { focused = value; } };
 }
+for (const selected of ['qa:parent', 'qa:role2']) test(`owned reopen preserves selected input pane ${selected}`, async t => {
+  const f = await setup(t); await f.controller.start(); await f.controller.openPair();
+  const state = JSON.parse(await readFile(f.controller.roleFile('dag'), 'utf8'));
+  const closed = once(f.events, `closed:${state.paneId}`, { signal: AbortSignal.timeout(3000) });
+  await control('close', state, 6001); await closed; f.focused = selected;
+  const original = f.controller.herdr;
+  f.controller.herdr = async (...args) => {
+    if (args[0] === 'neighbor') return { neighbor: { neighbor_pane_id: selected, layout: { tab_id: 'qa:tab', focused_pane_id: f.focused } } };
+    if (args[0] === 'focus') { f.calls.push(args); f.focused = selected; return {}; }
+    return original(...args);
+  };
+  await f.controller.openPair({ force: true });
+  assert.equal(f.focused, selected, 'swap must not change foreground input target');
+});
+for (const moment of ['split', 'swap', 'neighbor']) test(`later manual selection after ${moment} is never overwritten`, async t => {
+  const f = await setup(t); await f.controller.start(); await f.controller.openPair();
+  const state = JSON.parse(await readFile(f.controller.roleFile('dag'), 'utf8'));
+  const closed = once(f.events, `closed:${state.paneId}`, { signal: AbortSignal.timeout(3000) });
+  await control('close', state, 6001); await closed;
+  const original = f.controller.herdr;
+  f.controller.herdr = async (...args) => { const result = await original(...args); if (args[0] === moment) f.focused = 'qa:role2'; return result; };
+  await f.controller.openPair({ force: true }).catch(error => assert.match(error.message, /layout-waiting/));
+  assert.equal(f.focused, 'qa:role2', 'late manual selection is authoritative');
+  assert.equal(f.calls.filter(args => args[0] === 'focus').length, 0);
+  if (moment === 'split') assert.equal(f.calls.filter(args => args[0] === 'swap').length, 0);
+});
+test('inactive selected tab defers before any split or swap', async t => {
+  const f = await setup(t); await f.controller.start(); await f.controller.openPair();
+  const state = JSON.parse(await readFile(f.controller.roleFile('dag'), 'utf8'));
+  const closed = once(f.events, `closed:${state.paneId}`, { signal: AbortSignal.timeout(3000) });
+  await control('close', state, 6001); await closed;
+  f.panes.set('foreign:selected', { pane_id: 'foreign:selected', tab_id: 'foreign:tab' }); f.focused = 'foreign:selected';
+  const count = f.calls.filter(args => ['split', 'swap', 'focus'].includes(args[0])).length;
+  await assert.rejects(f.controller.openPair({ force: true }), /selected owned tab/);
+  assert.equal(f.calls.filter(args => ['split', 'swap', 'focus'].includes(args[0])).length, count);
+  assert.equal(f.focused, 'foreign:selected');
+  f.focused = 'qa:parent'; await f.controller.openPair({ force: true });
+  assert.equal(f.focused, 'qa:parent');
+});
 
 test('initial source save precedes launches; concurrent opens create exactly one fixed pair', async t => {
   const f = await setup(t);
@@ -239,7 +285,8 @@ test('DAG reopen restores the actually observed 23/23 collapsed owned region bef
   ];
   const originalHerdr = f.controller.herdr;
   f.controller.herdr = async (...args) => {
-    if (args[0] === 'layout') { f.calls.push(args); return { layout: { panes: structuredClone(rects) } }; }
+    if (args[0] === 'layout' && !f.panes.has('qa:role3')) { f.calls.push(args); return { layout: {
+      tab_id: 'qa:tab', focused_pane_id: f.focused, panes: structuredClone(rects) } }; }
     if (args[0] === 'resize') {
       rects[1].rect.height = 32; rects[2].rect.y = 32; rects[2].rect.height = 14;
     }
