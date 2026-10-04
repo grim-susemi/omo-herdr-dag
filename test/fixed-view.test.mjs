@@ -23,18 +23,27 @@ for (const view of ['dag', 'tasks']) for (const columns of [80, 29, 24])
     assert.match(foot, /OFFLINE/);
     assert.ok(frame.text.split('\n').every(line => width(line) < columns));
   });
+test('initial 60x12 worker viewport shows the whole active card and role controls', () => {
+  const frame = renderFixedFrame(state, { columns:60, rows:12, color:false, selectedTaskId:'st_ordinary' }, 'tasks');
+  const lines = frame.text.split('\n');
+  assert.ok(lines.some(line => /^╰─+╯$/.test(line)), 'Active card bottom is clipped');
+  assert.ok(frame.text.includes('ORDINARY_ROOT'));
+  assert.match(frame.text, /\$0\.4493.*21 tok\/s/);
+  assert.ok(lines.slice(-3).some(line => line.includes('Follow ON')));
+  assert.ok(lines.slice(-3).some(line => line.includes('c') && line.includes('q')));
+});
 test('workers viewport suppresses a border-only card edge without changing task ranges', () => {
   const source = {...state, runs:[], tasks:[
     {id:'active',status:'running',description:'ACTIVE',progress:'PROGRESS'},
     {id:'next',status:'pending',description:'NEXT'}]};
-  const frame = renderFixedFrame(source,{columns:80,rows:14,color:false,
+  const frame = renderFixedFrame(source,{columns:80,rows:13,color:false,
     selectedTaskId:'active'},'tasks');
   assert.deepEqual(frame.taskRanges.active,{start:0,end:7});
   assert.deepEqual(frame.taskRanges.next,{start:7,end:10});
   const body=frame.text.split('\n').slice(2,10);
   assert.match(body[6], /^╰/);
   assert.equal(body[7], '');
-  const colored = renderFixedFrame(source,{columns:80,rows:14,color:true,
+  const colored = renderFixedFrame(source,{columns:80,rows:13,color:true,
     selectedTaskId:'active'},'tasks');
   assert.equal(colored.text.split('\n')[9], '');
   const bottomOnly=renderFixedFrame(source,{columns:80,rows:7,color:false,scroll:6},'tasks');

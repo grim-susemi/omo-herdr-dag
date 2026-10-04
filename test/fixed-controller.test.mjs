@@ -179,6 +179,92 @@ test('manual workers close is durable, source updates do not reopen, explicit pa
   assert.equal((await f.controller.inspectPair()).dag.paneId, 'qa:role1');
 });
 
+test('workers reopen splits the verified surviving Todo region and places workers before Todo', async t => {
+  const f = await setup(t); await f.controller.start(); await f.controller.openPair();
+  const todo = { ...f.controller.binding, role: 'todo', paneId: 'qa:todo', tabId: 'qa:tab', scopeEpoch: 1, ready: true, manualClose: false };
+  f.panes.set(todo.paneId, { pane_id: todo.paneId, tab_id: todo.tabId });
+  f.controller.coordinator = { binding: f.controller.binding, lifetimeId: 'owned', inspectTodo: async () => todo };
+  const state = JSON.parse(await readFile(f.controller.roleFile('workers'), 'utf8'));
+  const closed = once(f.events, `closed:${state.paneId}`, { signal: AbortSignal.timeout(3000) });
+  await control('close', state, 6002); await closed;
+  await f.controller.openPair({ force: true });
+  const split = f.calls.filter(call => call[0] === 'split').at(-1);
+  assert.equal(split[split.indexOf('--pane') + 1], todo.paneId);
+  assert.equal(split[split.indexOf('--ratio') + 1], '0.5');
+  assert.deepEqual(f.calls.find(call => call[0] === 'swap'), ['swap', '--source-pane', 'qa:role3', '--target-pane', todo.paneId]);
+});
+
+test('DAG reopen splits surviving workers before them without a second right column', async t => {
+  const f = await setup(t); await f.controller.start(); await f.controller.openPair();
+  const state = JSON.parse(await readFile(f.controller.roleFile('dag'), 'utf8'));
+  const closed = once(f.events, `closed:${state.paneId}`, { signal: AbortSignal.timeout(3000) });
+  await control('close', state, 6001); await closed;
+  await f.controller.openPair({ force: true });
+  const split = f.calls.filter(call => call[0] === 'split').at(-1);
+  assert.equal(split[split.indexOf('--pane') + 1], 'qa:role2');
+  assert.equal(split[split.indexOf('--direction') + 1], 'down');
+  assert.deepEqual(f.calls.find(call => call[0] === 'swap'), ['swap', '--source-pane', 'qa:role3', '--target-pane', 'qa:role2']);
+});
+
+test('both fixed roles reopen inside surviving Todo without changing its pane identity', async t => {
+  const f = await setup(t); await f.controller.start(); await f.controller.openPair();
+  const todo = { ...f.controller.binding, role: 'todo', paneId: 'qa:todo', tabId: 'qa:tab', scopeEpoch: 1, ready: true, manualClose: false };
+  f.panes.set(todo.paneId, { pane_id: todo.paneId, tab_id: todo.tabId });
+  f.controller.coordinator = { binding: f.controller.binding, lifetimeId: 'owned', inspectTodo: async () => todo };
+  for (const [role, pid] of [['dag', 6001], ['workers', 6002]]) {
+    const state = JSON.parse(await readFile(f.controller.roleFile(role), 'utf8'));
+    const closed = once(f.events, `closed:${state.paneId}`, { signal: AbortSignal.timeout(3000) });
+    await control('close', state, pid); await closed;
+  }
+  await f.controller.openPair({ force: true });
+  const splits = f.calls.filter(call => call[0] === 'split').slice(2);
+  assert.deepEqual(splits.map(call => call[call.indexOf('--pane') + 1]), [todo.paneId, todo.paneId]);
+  assert.deepEqual(splits.map(call => call[call.indexOf('--ratio') + 1]), ['0.4', '0.5']);
+  assert.equal(f.panes.has(todo.paneId), true);
+});
+
+test('DAG reopen restores the actually observed 23/23 collapsed owned region before splitting', async t => {
+  const f = await setup(t); await f.controller.start(); await f.controller.openPair();
+  const todo = { ...f.controller.binding, role: 'todo', paneId: 'qa:todo', tabId: 'qa:tab', scopeEpoch: 1, ready: true, manualClose: false };
+  f.panes.set(todo.paneId, { pane_id: todo.paneId, tab_id: todo.tabId });
+  f.controller.coordinator = { binding: f.controller.binding, lifetimeId: 'owned', inspectTodo: async () => todo };
+  const state = JSON.parse(await readFile(f.controller.roleFile('dag'), 'utf8'));
+  const closed = once(f.events, `closed:${state.paneId}`, { signal: AbortSignal.timeout(3000) });
+  await control('close', state, 6001); await closed;
+  // Exact public Herdr rects from the real 18/14/14 -> 23/23 collapse probe.
+  const rects = [
+    { pane_id: 'qa:parent', rect: { x: 0, y: 0, width: 112, height: 46 } },
+    { pane_id: 'qa:role2', rect: { x: 112, y: 0, width: 60, height: 23 } },
+    { pane_id: 'qa:todo', rect: { x: 112, y: 23, width: 60, height: 23 } },
+  ];
+  const originalHerdr = f.controller.herdr;
+  f.controller.herdr = async (...args) => {
+    if (args[0] === 'layout') { f.calls.push(args); return { layout: { panes: structuredClone(rects) } }; }
+    if (args[0] === 'resize') {
+      rects[1].rect.height = 32; rects[2].rect.y = 32; rects[2].rect.height = 14;
+    }
+    return originalHerdr(...args);
+  };
+  const start = f.calls.length;
+  await f.controller.openPair({ force: true });
+  const actions = f.calls.slice(start).filter(call => ['resize', 'split', 'swap'].includes(call[0]));
+  assert.equal(actions[0]?.[0], 'resize', 'Collapsed 23/23 region must become 32/14 before inserting the DAG');
+  assert.equal(actions[0][actions[0].indexOf('--pane') + 1], 'qa:role2');
+  assert.equal(actions[0][actions[0].indexOf('--direction') + 1], 'down');
+  assert.equal(Number(actions[0][actions[0].indexOf('--amount') + 1]), 9 / 46);
+  assert.equal(actions[1][0], 'split'); assert.equal(actions[2][0], 'swap');
+  assert.equal(f.panes.has(todo.paneId), true);
+});
+
+for (const mismatch of ['ownerKey', 'sessionId', 'scopeEpoch', 'role', 'tabId', 'ready']) test(`reopen rejects a ${mismatch} mismatch in the Todo anchor before pane changes`, async t => {
+  const f = await setup(t); await f.controller.start(); await f.controller.openPair();
+  const todo = { ...f.controller.binding, role: 'todo', paneId: 'qa:todo', tabId: 'qa:tab', scopeEpoch: 1, ready: true, manualClose: false, [mismatch]: 'foreign' };
+  f.controller.coordinator = { binding: f.controller.binding, lifetimeId: 'owned', inspectTodo: async () => todo };
+  const before = f.calls.filter(call => ['split', 'swap', 'close', 'run'].includes(call[0])).length;
+  await assert.rejects(f.controller.openPair({ force: true }), /layout-waiting/);
+  assert.equal(f.calls.filter(call => ['split', 'swap', 'close', 'run'].includes(call[0])).length, before);
+});
+
 test('a concurrent fixed-pair adoption cannot overwrite the workers manual close', { timeout: 7000 }, async t => {
   const f = await setup(t); await f.controller.start(); await f.controller.openPair();
   const state = JSON.parse(await readFile(f.controller.roleFile('workers'), 'utf8'));

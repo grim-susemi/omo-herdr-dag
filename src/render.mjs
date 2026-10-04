@@ -414,7 +414,7 @@ export function renderFrame(state, { columns = 54, rows = 48, runIndex = 0, scro
   }
   const showCloseHint = !state?.connected;
   const narrow = columns < 40;
-  const available = Math.max(0, rows - head.length - (tasksView || narrow ? 4 : showCloseHint ? 6 : 5));
+  const available = Math.max(0, rows - head.length - (narrow ? 4 : tasksView ? 3 : showCloseHint ? 6 : 5));
   const selected = tasksView ? taskRanges[selectedTaskId] : nodeRanges[selectedNodeId];
   if (revealSelection && selected && available > 0) {
     if (verbose || selected.start < scroll || selected.start + Math.min(3, available) > scroll + available) scroll = selected.start;
@@ -444,7 +444,7 @@ export function renderFrame(state, { columns = 54, rows = 48, runIndex = 0, scro
     narrow ? `f ${t(language, follow && state?.connected ? 'followShortOn' : 'followShortOff')} ${t(language, offline || !state?.connected ? 'offlineShort' : 'liveShort')}${range}` :
       `f ${t(language, follow && state?.connected ? 'followOn' : 'followOff')} · ${notice || `${state?.connected ? `● ${t(language, 'connected')}` : `○ ${t(language, 'disconnected')}`}${body.length > available ? `  ${start + 1}–${Math.min(start + available, body.length)}/${body.length}` : ''}`}`;
   const foot = narrow ? [fit(status, columns), fit('n/p Space/Enter', columns),
-    fit(t(language, tasksView ? 'workerGroupKeys' : 'dagGroupKeys'), columns), fit(t(language, 'detailCloseKeys'), columns)] : ['─'.repeat(columns),
+    fit(t(language, tasksView ? 'workerGroupKeys' : 'dagGroupKeys'), columns), fit(t(language, 'detailCloseKeys'), columns)] : [...(tasksView ? [] : ['─'.repeat(columns)]),
     fit(status, columns),
     ...(!tasksView && showCloseHint ? [fit(t(language, 'closeHint'), columns)] : []),
     ...(tasksView ? [fit(columns < 40 ? 'n/p Space/Enter' : `${t(language, 'nodeControls')}  ${t(language, 'toggleControls')}`, columns),

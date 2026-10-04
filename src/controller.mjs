@@ -535,7 +535,7 @@ export class FixedDagPane extends DagPane {
     const pair = {};
     for (const role of ['dag', 'workers']) {
       const record = await readJson(this.paneFile(role));
-      if (record && await this.verify(record)) pair[role] = record;
+      if (record && !record.manualClose && await this.verify(record)) pair[role] = record;
     }
     return pair;
   }
@@ -565,14 +565,53 @@ export class FixedDagPane extends DagPane {
       if (await readJson(this.legacyRecordFile) && !await readJson(this.paneFile('dag'))) {
         this.status = 'layout-waiting'; return {};
       }
-      const dag = await this.ensureRole('dag', this.parentPane, 'right', '0.65', parent.tabId, force);
+      const todo = await this.coordinator?.inspectTodo?.();
+      if (todo && (!sameOwner(todo, this.binding) || todo.role !== 'todo' || todo.tabId !== parent.tabId ||
+        todo.scopeEpoch !== this.scopeEpoch || todo.ready !== true || todo.manualClose || todo.paneId === this.parentPane))
+        throw new Error('layout-waiting: stale or foreign Todo anchor');
+      if (todo) await this.membership(todo.paneId);
+      const existing = await this.inspectPair();
+      if (!existing.dag && existing.workers && todo) {
+        // Closing the top DAG collapses the right-hand tree to workers/Todo
+        // at 50/50. Restore their owned boundary before inserting the DAG.
+        const geometry = async () => {
+          const layout = (await this.herdr('layout', '--pane', existing.workers.paneId))?.layout;
+          const rect = id => layout?.panes?.filter(pane => pane.pane_id === id);
+          const rows = [this.parentPane, existing.workers.paneId, todo.paneId].map(rect);
+          if (rows.some(values => values?.length !== 1)) throw new Error('layout-waiting: ambiguous owned geometry');
+          const [parentRect, workerRect, todoRect] = rows.map(values => values[0].rect);
+          if ([parentRect, workerRect, todoRect].some(value => !value ||
+            !['x', 'y', 'width', 'height'].every(key => Number.isFinite(value[key])) || value.width <= 0 || value.height <= 0) ||
+            workerRect.x !== parentRect.x + parentRect.width || workerRect.x !== todoRect.x ||
+            workerRect.width !== todoRect.width || workerRect.y !== parentRect.y ||
+            workerRect.y + workerRect.height !== todoRect.y || workerRect.height + todoRect.height !== parentRect.height)
+            throw new Error('layout-waiting: non-contiguous owned region');
+          return { parentRect, workerRect, todoRect };
+        };
+        const before = await geometry(), total = before.parentRect.height, desired = Math.round(total * .7);
+        if (before.workerRect.height !== desired) {
+          await this.membership(existing.workers.paneId); await this.membership(todo.paneId);
+          await this.herdr('resize', '--pane', existing.workers.paneId, '--direction', before.workerRect.height < desired ? 'down' : 'up',
+            '--amount', String(Math.abs(desired - before.workerRect.height) / total));
+          const after = await geometry();
+          if (after.workerRect.height !== desired || JSON.stringify(after.parentRect) !== JSON.stringify(before.parentRect) ||
+            after.workerRect.x !== before.workerRect.x || after.workerRect.width !== before.workerRect.width)
+            throw new Error('layout-waiting: owned boundary resize mismatch');
+        }
+      }
+      const dagAnchor = existing.workers?.paneId ?? todo?.paneId ?? this.parentPane;
+      const sibling = Boolean(existing.workers || todo);
+      const dag = await this.ensureRole('dag', dagAnchor, sibling ? 'down' : 'right',
+        existing.workers && todo ? String(4 / 7) : sibling ? '0.4' : '0.65', parent.tabId, force,
+        sibling ? dagAnchor : null);
       if (!dag) return {};
-      const workers = await this.ensureRole('workers', dag.paneId, 'down', '0.4', parent.tabId, force);
+      const workers = await this.ensureRole('workers', todo?.paneId ?? dag.paneId, 'down',
+        todo ? '0.5' : '0.4', parent.tabId, force, todo?.paneId);
       this.status = workers ? 'current' : 'layout-waiting';
       return { dag, workers };
     });
   }
-  async ensureRole(role, anchor, direction, ratio, tabId, force) {
+  async ensureRole(role, anchor, direction, ratio, tabId, force, beforePane) {
     if (force) await this.roleTail;
     let record = await readJson(this.paneFile(role));
     if (record && !this.recordMatches(record, role)) return;
@@ -616,6 +655,10 @@ export class FixedDagPane extends DagPane {
     if (!result?.pane?.pane_id) throw new Error('Owned fixed-role split returned no pane ID');
     record.paneId = result.pane.pane_id;
     await this.membership(record.paneId);
+    if (beforePane) {
+      await this.membership(beforePane);
+      await this.herdr('swap', '--source-pane', record.paneId, '--target-pane', beforePane);
+    }
     const createdInfo = await this.herdr('process-info', '--pane', record.paneId);
     record.creationProcessId = createdInfo?.process_info?.shell_pid;
     const shell = await observePaneShell(createdInfo, record, this.inspectShell);
