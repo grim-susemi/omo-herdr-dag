@@ -2,6 +2,18 @@
 
 **Live OmO workflow DAGs in a Herdr side pane.**
 
+## Concurrent candidate on this branch
+
+With the Todo companion loaded, this branch shows fixed DAG, ordinary workers and native Todo together, initially 40/30/30 of the right-column height. Each role has independent `f` follow/manual navigation and `c` completion controls; `t` does not switch fixed roles. `q` closes one role, and updates do not reopen it. `/dag-pane` explicitly reopens DAG/workers; `/todo-pane` reopens Todo. Verified owned sibling placement preserves surviving role identities and conversation focus/geometry.
+
+Completed ordinary roots fold only when descendants are terminal and non-error. Active/error descendants, blocked/paused/lost states and manual expansions remain accessible. Read-error and disconnected last-known status stay explicit. Cost/speed is reported, estimated or unknown; reported zero is retained and generation time differs from wall time.
+
+Use an explicit disposable `--agent-dir` for candidate tests. Copying a generation installs it; a new session or `/reload` loads it. Current processes/painted ACKs establish live coverage. This local candidate differs from the npm stable release illustrated by historical material below. Primary activation and external publication are separate decisions.
+
+한국어: DAG·작업자·Todo를 동시에 표시합니다. 각 화면의 `f` 추적, 수동 탐색, `c` 접기가 독립적이며 `q`로 해당 화면만 닫습니다. 다시 열 때 기존 화면과 대화 위치를 보존하며 연결 종료 자료를 최신 진행으로 표시하지 않습니다.
+
+## Released standalone DAG reference
+
 English | [한국어](README_KO.md) | [简体中文](README_ZH.md)
 
 `omo-herdr-dag` is an [OmO](https://github.com/code-yeongyu/oh-my-openagent) extension that opens a dedicated TUI in [Herdr](https://herdr.dev/) when a workflow DAG appears. Follow dependencies and node states beside your conversation, with focus kept in the original pane.
