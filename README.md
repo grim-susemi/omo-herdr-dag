@@ -4,13 +4,13 @@
 
 ## Concurrent candidate on this branch
 
-With the Todo companion loaded, this branch shows fixed DAG, ordinary workers and native Todo together, initially 40/30/30 of the right-column height. Each role has independent `f` follow/manual navigation and `c` completion controls; `t` does not switch fixed roles. `q` closes one role, and updates do not reopen it. `/dag-pane` explicitly reopens DAG/workers; `/todo-pane` reopens Todo. Verified owned sibling placement preserves surviving role identities and conversation focus/geometry.
+With the Todo companion loaded, this branch shows fixed DAG, ordinary workers and native Todo together, initially 40/30/30 of the right-column height. Each role has independent `f` follow/manual navigation and `c` completion controls; `t` does not switch fixed roles. `q` closes one role, and updates do not reopen it. `/dag-pane` explicitly reopens DAG/workers; `/todo-pane` reopens Todo. Verified owned sibling placement preserves surviving role identities and geometry; input selection uses the observed guards described under [focus-safe owned reopen](#focus-safe-owned-reopen).
 
 Completed ordinary roots fold only when descendants are terminal and non-error. Active/error descendants, blocked/paused/lost states and manual expansions remain accessible. Read-error and disconnected last-known status stay explicit. Cost/speed is reported, estimated or unknown; reported zero is retained and generation time differs from wall time.
 
 Use an explicit disposable `--agent-dir` for candidate tests. Copying a generation installs it; a new session or `/reload` loads it. Current processes/painted ACKs establish live coverage. This local candidate differs from the npm stable release illustrated by historical material below. Primary activation and external publication are separate decisions.
 
-한국어: DAG·작업자·Todo를 동시에 표시합니다. 각 화면의 `f` 추적, 수동 탐색, `c` 접기가 독립적이며 `q`로 해당 화면만 닫습니다. 다시 열 때 기존 화면과 대화 위치를 보존하며 연결 종료 자료를 최신 진행으로 표시하지 않습니다.
+한국어: DAG·작업자·Todo를 동시에 표시합니다. 각 화면의 `f` 추적, 수동 탐색, `c` 접기가 독립적이며 `q`로 해당 화면만 닫습니다. 다시 열 때 기존 화면 배치를 보존하고 관측된 입력 대상만 조건부 복원하며, 연결 종료 자료를 최신 진행으로 표시하지 않습니다.
 
 ## Released standalone DAG reference
 
@@ -260,3 +260,19 @@ Contributions, compatibility reports, and improvements to terminal rendering are
 ## License
 
 [MIT](LICENSE). This is an independent community extension, not an official OmO or Herdr component.
+
+## Focus-safe owned reopen
+
+Herdr 0.9.3 `swap` temporarily selects its source pane. Reopening an owned
+dashboard role therefore verifies the selected owner tab before splitting and
+restores the prior verified parent/role through owned neighbors. A later observed
+manual selection cancels restoration. Fresh selection checks and separate RPCs
+are not atomic; validation establishes the final observed Herdr input target,
+not an absence of transient focus or OS/hardware keyboard behavior.
+When preflight observes another selected tab, placement is deferred before a new
+shell is created. Native coverage remains role-specific: a healthy Todo with its
+own ready ACK can stay covered, while missing DAG-owned roles lose coverage. If
+Todo itself is closed or unready, its original native display is restored. Select
+the owner tab and retry `/dag-pane` when its source is ready, and `/todo-pane` if
+Todo was closed. Placement and restoration require verified owned membership;
+they do not select another tab to complete background placement.
