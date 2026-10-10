@@ -8,7 +8,9 @@ The unified `omo-herdr-dashboard` entry shows native Todo above ordinary workers
 
 Completed ordinary roots fold only when descendants are terminal and non-error. Active/error descendants, blocked/paused/lost states and manual expansions remain accessible. Read-error and disconnected last-known status stay explicit. Cost/speed is reported, estimated or unknown; reported zero is retained and generation time differs from wall time.
 
-Use an explicit disposable `--agent-dir` for candidate tests. Copying a generation installs it; a new session or `/reload` loads it. Current processes/painted ACKs establish live coverage. This local candidate differs from the npm stable release illustrated by historical material below. Primary activation and external publication are separate decisions.
+The current source history is on this fork's [`feat/concurrent-views-and-metrics` branch](https://github.com/grim-susemi/omo-herdr-dag/tree/feat/concurrent-views-and-metrics), paired with the [Todo source branch](https://github.com/grim-susemi/omo-herdr-todo/tree/feat/concurrent-dashboard). Clone these exact branches for the concurrent candidate; the npm commands and upstream clone below describe the standalone stable release, not this candidate.
+
+Use an explicit disposable `--agent-dir` for candidate tests. Copying a generation installs it; a new session or `/reload` loads it. Current processes/painted ACKs establish live coverage. GitHub source publication does not activate the primary harness or publish a new npm release.
 
 한국어: DAG·작업자·Todo를 동시에 표시합니다. 각 화면의 `f` 추적, 수동 탐색, `c` 접기가 독립적이며 `q`로 해당 화면만 닫습니다. 다시 열 때 기존 화면 배치를 보존하고 관측된 입력 대상만 조건부 복원하며, 연결 종료 자료를 최신 진행으로 표시하지 않습니다.
 
