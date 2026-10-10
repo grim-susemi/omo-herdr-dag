@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import net from 'node:net';
 import { EventEmitter, once } from 'node:events';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -9,6 +10,29 @@ import { test } from 'node:test';
 import { FixedDagPane, paneViewerProcess, canCleanupPane, parseLaunchCommand } from '../src/controller.mjs';
 import { writeJson } from '../src/storage.mjs';
 import { payload, sessionId } from './fixtures.mjs';
+
+test('POSIX cleanup accepts the owned viewer but refuses foreign foreground siblings', () => {
+  const module = new URL('../src/controller.mjs', import.meta.url).href;
+  const code = `
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    const { canCleanupPane } = await import(${JSON.stringify(module)});
+    const record = { creationProcessId: 456, processId: 123, nodePath: 'node',
+      viewerPath: 'viewer.mjs', role: 'dag', statePath: 'state.json',
+      paneId: 'qa:pane', launchToken: 'launch' };
+    const owned = { pid: 123, argv: ['node', 'viewer.mjs', '--view', 'dag',
+      '--state', 'state.json', '--close-pane', 'qa:pane', '--launch-token', 'launch'] };
+    const shell = { pid: 456, argv: ['sh'] }, foreign = { pid: 789, argv: ['foreign'] };
+    const results = [];
+    for (const rows of [[owned], [shell], [owned, foreign], [owned, owned]]) {
+      results.push(await canCleanupPane({ process_info: {
+        shell_pid: 456, foreground_processes: rows } }, record));
+    }
+    console.log(JSON.stringify(results));
+  `;
+  const output = execFileSync(process.execPath, ['--input-type=module', '--eval', code],
+    { encoding: 'utf8', timeout: 10000 });
+  assert.deepEqual(JSON.parse(output), [true, true, false, false]);
+});
 
 function control(type, state, pid) {
   return new Promise((resolve, reject) => {
@@ -367,13 +391,22 @@ test('failed launch records its exact attempt and does not spawn another orphan 
 });
 
 for (const kind of ['foreign-child', 'foreign-sibling', 'missing-shell', 'query-failure', 'owned-child'])
-test(`failed launch ${kind} uses complete native observation for cleanup`, async t => {
+test(`failed launch ${kind} uses complete platform process observation for cleanup`, async t => {
   const f = await setup(t), original = f.controller.herdr, inspect = f.options.inspectShell;
   let launched = false, argv;
   f.controller.herdr = async (...args) => {
     if (args[0] === 'run') {
       argv = [...args[2].matchAll(/'((?:''|[^'])*)'/g)].map(match => match[1].replaceAll("''", "'"));
       launched = true; throw new Error('launch failed');
+    }
+    if (args[0] === 'process-info' && launched && process.platform !== 'win32') {
+      const { process_info } = await original(...args);
+      const rows = await f.controller.inspectShell(process_info.shell_pid);
+      if (!rows.some(row => row.ProcessId === process_info.shell_pid))
+        return { process_info: { ...process_info, shell_pid: null } };
+      return { process_info: { ...process_info, foreground_processes: rows
+        .filter(row => row.ProcessId !== process_info.shell_pid)
+        .map(row => ({ pid: row.ProcessId, argv: parseLaunchCommand(row.CommandLine) })) } };
     }
     return original(...args);
   };
@@ -393,10 +426,10 @@ test(`failed launch ${kind} uses complete native observation for cleanup`, async
   assert.equal(f.panes.size, kind === 'owned-child' ? 1 : 2);
 });
 
-test('shell/native child registration supports pair reuse and authenticated manual close', async t => {
+test('platform child registration supports pair reuse and authenticated manual close', async t => {
   const f = await setup(t), original = f.controller.herdr;
   f.controller.herdr = async (...args) => {
-    if (args[0] === 'process-info') {
+    if (args[0] === 'process-info' && process.platform === 'win32') {
       const pid = 7000 + Number(args[2].replace('qa:role', ''));
       return { process_info: { shell_pid: pid, foreground_processes: [{ pid, argv: ['powershell.exe'] }] } };
     }

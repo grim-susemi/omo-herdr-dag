@@ -355,8 +355,11 @@ export async function paneViewerProcess(info, record, expectedPid, inspect) {
 }
 export async function canCleanupPane(info, record, inspect) {
   if (info?.process_info?.shell_pid !== record.creationProcessId) return false;
-  if (process.platform !== 'win32') return (info.process_info.foreground_processes ?? [])
-    .every(row => row.pid === record.creationProcessId) || Boolean(processMatch(info, record));
+  if (process.platform !== 'win32') {
+    const foreground = info.process_info.foreground_processes ?? [];
+    return foreground.every(row => row.pid === record.creationProcessId) ||
+      foreground.length === 1 && Boolean(processMatch(info, record));
+  }
   if (!record.creationDate) return false;
   const observation = await observePaneShell(info, record, inspect);
   if (!observation) return false;
