@@ -390,15 +390,17 @@ test('failed launch records its exact attempt and does not spawn another orphan 
   assert.equal(f.panes.size, 1, 'failed launch must leave no owned orphan pane');
 });
 
-for (const kind of ['foreign-child', 'foreign-sibling', 'missing-shell', 'query-failure', 'owned-child'])
+for (const kind of ['foreign-child', 'foreign-sibling', 'missing-shell', 'query-failure', 'report-failure', 'owned-child'])
 test(`failed launch ${kind} uses complete platform process observation for cleanup`, async t => {
   const f = await setup(t), original = f.controller.herdr, inspect = f.options.inspectShell;
+  const launchError = new Error('launch failed'), observationError = new Error('CIM failed');
   let launched = false, argv;
   f.controller.herdr = async (...args) => {
     if (args[0] === 'run') {
       argv = [...args[2].matchAll(/'((?:''|[^'])*)'/g)].map(match => match[1].replaceAll("''", "'"));
-      launched = true; throw new Error('launch failed');
+      launched = true; throw launchError;
     }
+    if (args[0] === 'process-info' && launched && kind === 'report-failure') throw observationError;
     if (args[0] === 'process-info' && launched && process.platform !== 'win32') {
       const { process_info } = await original(...args);
       const rows = await f.controller.inspectShell(process_info.shell_pid);
@@ -413,7 +415,7 @@ test(`failed launch ${kind} uses complete platform process observation for clean
   f.controller.inspectShell = async pid => {
     const rows = await inspect(pid);
     if (!launched) return rows;
-    if (kind === 'query-failure') throw new Error('CIM failed');
+    if (kind === 'query-failure') throw observationError;
     if (kind === 'missing-shell') return [];
     const owned = { ProcessId: 6001, ParentProcessId: pid, ExecutablePath: argv[0],
       CommandLine: argv.map(value => `"${value}"`).join(' '), CreationDate: '2026-10-03T00:00:01.000Z' };
@@ -421,7 +423,12 @@ test(`failed launch ${kind} uses complete platform process observation for clean
     return [...rows, ...(kind === 'foreign-child' ? [foreign] : kind === 'foreign-sibling' ? [owned, foreign] : [owned])];
   };
   await f.controller.start();
-  await assert.rejects(f.controller.openPair(), /launch failed/);
+  await assert.rejects(f.controller.openPair(), error => {
+    assert.equal(error, launchError);
+    if (kind === 'report-failure' || kind === 'query-failure' && process.platform !== 'win32')
+      assert.equal(error.cause, observationError);
+    return true;
+  });
   assert.equal(f.calls.filter(call => call[0] === 'close').length, kind === 'owned-child' ? 1 : 0);
   assert.equal(f.panes.size, kind === 'owned-child' ? 1 : 2);
 });

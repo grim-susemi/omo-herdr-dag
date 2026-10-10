@@ -724,8 +724,14 @@ export class FixedDagPane extends DagPane {
     } catch (error) {
       const current = await readJson(this.paneFile(role));
       if (!this.stopped && current?.launchToken === launchToken && Number.isSafeInteger(record.creationProcessId)) {
-        await this.membership(record.paneId);
-        const info = await this.herdr('process-info', '--pane', record.paneId);
+        let info;
+        try {
+          await this.membership(record.paneId);
+          info = await this.herdr('process-info', '--pane', record.paneId);
+        } catch (cleanupError) {
+          error.cause = cleanupError;
+          throw error;
+        }
         if (await canCleanupPane(info, record, this.inspectShell)) {
           await this.herdr('close', record.paneId);
           const failed = { ...current, paneId: null, ready: false, failed: true };
