@@ -93,6 +93,8 @@ const selectedNodes = new Map();
 let revealSelection = false, verbose = false, detailSelection, completedExpanded = false;
 let follow = true, target;
 let presenceClient, presenceMessage, presenceKey, controlKey, presenceNotice = '';
+let retirementServer;
+const retirementSockets = new Set();
 function bindPresence() {
   if (!fixedView || !interactive || !launchToken || !validManaged(state)) return;
   const control = JSON.stringify(state.controlOffer);
@@ -234,6 +236,8 @@ async function close(closePane = false) {
   closing = true;
   clearTimeout(timer); clearInterval(clock); watcher.close(); process.stdout.off('resize', resize);
   presenceClient?.destroy();
+  for (const socket of retirementSockets) socket.destroy();
+  if (retirementServer?.listening) await new Promise(resolve => retirementServer.close(resolve));
   await saving;
   process.stdin.setRawMode(false);
   process.stdout.write('\x1b[?25h\x1b[?1049l');
@@ -336,6 +340,25 @@ process.stdin.on('keypress', (text, pressed) => {
   }
 });
 process.on('SIGTERM', () => { void close(); }); process.on('SIGINT', () => { void close(); }); process.on('SIGHUP', () => { void close(); });
+if (fixedView && launchToken) {
+  retirementServer = net.createServer(socket => {
+    retirementSockets.add(socket);
+    socket.on('error', () => {});
+    socket.once('close', () => retirementSockets.delete(socket));
+    receive(socket, message => {
+      if (closing || message?.type !== 'retire' || typeof message.nonce !== 'string' || !message.nonce ||
+        message.statePath !== file || message.launchToken !== launchToken || message.paneId !== paneId ||
+        !['role', 'sessionId', 'ownerKey', 'scopeEpoch', 'paneId', 'launchToken']
+          .every(key => message[key] === state[key])) return socket.destroy();
+      socket.end(`${JSON.stringify({ type: 'retiring', nonce: message.nonce,
+        launchToken, manual: false })}\n`, () => { void close(false); });
+    });
+  });
+  await new Promise((resolve, reject) => {
+    retirementServer.once('error', reject); retirementServer.once('listening', resolve);
+    retirementServer.listen(`\\\\.\\pipe\\omo-herdr-viewer-retirement-${createHash('sha256').update(launchToken).digest('hex')}`);
+  });
+}
 bindPresence();
 draw();
 // Recover a replacement that raced with watcher registration.

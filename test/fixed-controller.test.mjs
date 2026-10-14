@@ -7,6 +7,9 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
+import * as fixedController from '../src/controller.mjs';
 import { FixedDagPane, paneViewerProcess, canCleanupPane, parseLaunchCommand } from '../src/controller.mjs';
 import { writeJson } from '../src/storage.mjs';
 import { payload, sessionId } from './fixtures.mjs';
@@ -120,12 +123,14 @@ async function setup(t) {
     return {};
   };
   const options = { sessionId, parentPane: 'qa:parent', socket: 'qa:socket', stateDir: directory,
+    managedStateDir: join(directory, 'no-managed-owner'),
     cwd: directory, taskStateDir: join(directory, 'native-source'), node: 'node', viewer: join(directory, 'viewer.mjs'),
     herdr, notify: message => warnings.push(message),
     inspectShell: async pid => [{ ProcessId: pid, ExecutablePath: 'powershell.exe',
-      CommandLine: 'powershell.exe', CreationDate: '2026-10-03T00:00:00.000Z' },
+      CommandLine: 'powershell.exe', CreationDate: '2026-10-03T00:00:00.000Z', Birth: '133800000000000000' },
     ...(processes.get(`qa:role${pid - 7000}`) ?? []).map(row => ({
       ProcessId: row.pid, ParentProcessId: pid, ExecutablePath: row.argv[0],
+      Birth: '133800000010000000',
       CommandLine: row.argv.map(value => `"${value}"`).join(' '), CreationDate: '2026-10-03T00:00:01.000Z',
     }))] };
   const controller = new FixedDagPane(options);
@@ -140,6 +145,113 @@ async function setup(t) {
   return { directory, calls, warnings, events, panes, processes, options, controller, controllers,
     get focused() { return focused; }, set focused(value) { focused = value; } };
 }
+for (const [empty, sameSession] of [[false, false], [true, false], [true, true]])
+  test(`task5 retained fixed replacement resolves its executable before launch (${empty ? 'empty' : 'live'}, ${sameSession ? 'resume' : 'fresh'})`, async t => {
+  const f = await setup(t);
+  await f.controller.start();
+  await f.controller.openPair();
+  const before = f.calls.length;
+  const old = JSON.parse(await readFile(f.controller.paneFile('dag'), 'utf8'));
+  let resolutions = 0, retired = false;
+  f.controller.node = async () => { resolutions++; return f.options.node; };
+  f.controller.coordinator = {
+    actor: {},
+    async retireRetainedRole(retained, prepare) {
+      assert.equal(retained.record.paneId, old.paneId);
+      await prepare();
+      retired = true;
+    },
+  };
+  const herdr = f.controller.herdr;
+  f.controller.herdr = async (...args) => {
+    if (args[0] === 'run') {
+      assert.equal(retired, true);
+      const argv = [...args[2].matchAll(/'((?:''|[^'])*)'/g)].map(match => match[1].replaceAll("''", "'"));
+      assert.equal(argv[0], f.options.node);
+    }
+    return herdr(...args);
+  };
+  await f.controller.replaceRetained([{ state: 'retained', empty,
+    record: { ...old, sessionId: sameSession ? f.controller.sessionId : 'prior-conversation' } }]);
+  assert.equal(resolutions, 1);
+  const current = JSON.parse(await readFile(f.controller.paneFile('dag'), 'utf8'));
+  assert.equal(current.nodePath, f.options.node);
+  assert.equal(current.paneId, old.paneId);
+  assert.notEqual(current.launchToken, old.launchToken);
+  assert.equal(f.calls.slice(before).filter(args => args[0] === 'split').length, 0);
+});
+
+for (const fail of [false, true]) test(`task30 launch joins its authenticated registration job (${fail ? 'failure' : 'success'})`, async t => {
+  const f = await setup(t);
+  await f.controller.start();
+  await f.controller.openPair();
+  const record = JSON.parse(await readFile(f.controller.paneFile('workers'), 'utf8'));
+  const release = Promise.withResolvers();
+  let registered, viewerHeld;
+  const error = Object.assign(new Error('Registration refused'), { code: 'REGISTRATION_REFUSED' });
+  f.controller.managedAvailable = true;
+  f.controller.launchRegistrations = new Map();
+  const get = f.controller.launchRegistrations.get.bind(f.controller.launchRegistrations);
+  f.controller.launchRegistrations.get = token => {
+    const job = get(token);
+    assert.ok(job instanceof Promise);
+    f.events.emit('registration-joined');
+    return job;
+  };
+  f.controller.coordinator = {
+    actor: { blocked: false },
+    async mutate(role, type, target, args, effect) {
+      const result = await f.options.herdr(...args);
+      await effect;
+      f.events.emit('run-settled');
+      return result;
+    },
+    async registerRole(role, readTarget) {
+      const target = await readTarget();
+      f.events.emit('registration-held');
+      await release.promise;
+      if (fail) throw error;
+      registered = target;
+    },
+    async holdRoleViewer(role, current) {
+      assert.equal(role, 'workers');
+      viewerHeld = current;
+    },
+  };
+  const signal = AbortSignal.timeout(3000);
+  const held = once(f.events, 'registration-held', { signal });
+  const settled = once(f.events, 'run-settled', { signal });
+  const joined = once(f.events, 'registration-joined', { signal });
+  const launch = f.controller.launchRole(record);
+  launch.catch(() => {});
+  try {
+    await held;
+    await settled;
+    assert.equal(await Promise.race([joined.then(() => 'joined'), launch.then(() => 'exposed')]), 'joined');
+    assert.equal(registered, undefined);
+    assert.equal(viewerHeld, undefined);
+    release.resolve();
+    if (fail) {
+      await assert.rejects(launch, { code: error.code });
+      assert.equal(viewerHeld, undefined);
+    }
+    else {
+      const current = await launch;
+      assert.equal(current.paneId, registered.paneId);
+      assert.equal(current.processId, registered.viewer.pid);
+      assert.equal(registered.shell.pid, record.creationProcessId);
+      assert.equal(viewerHeld.paneId, current.paneId);
+      assert.equal(viewerHeld.processId, current.processId);
+      assert.equal(viewerHeld.launchToken, record.launchToken);
+    }
+    assert.equal(f.controller.launchRegistrations.has(record.launchToken), false);
+  } finally {
+    release.resolve();
+    await Promise.allSettled([launch, ...f.controller.controlJobs]);
+    f.controller.managedAvailable = false;
+  }
+});
+
 for (const selected of ['qa:parent', 'qa:role2']) test(`owned reopen preserves selected input pane ${selected}`, async t => {
   const f = await setup(t); await f.controller.start(); await f.controller.openPair();
   const state = JSON.parse(await readFile(f.controller.roleFile('dag'), 'utf8'));
@@ -247,6 +359,48 @@ test('manual workers close is durable, source updates do not reopen, explicit pa
   await f.controller.openPair({ force: true });
   assert.equal(f.calls.filter(call => call[0] === 'split').length, 3);
   assert.equal((await f.controller.inspectPair()).dag.paneId, 'qa:role1');
+});
+
+test('a cancelled workers reopen does not inherit a surviving DAG reopen request', async t => {
+  const f = await setup(t);
+  await f.controller.start(); await f.controller.openPair();
+  for (const [role, pid] of [['dag', 6001], ['workers', 6002]]) {
+    const state = JSON.parse(await readFile(f.controller.roleFile(role), 'utf8'));
+    const closed = once(f.events, `closed:${state.paneId}`, { signal: AbortSignal.timeout(3000) });
+    assert.equal((await control('close', state, pid)).type, 'closed');
+    await closed;
+  }
+  const runs = f.calls.filter(call => call[0] === 'run').length;
+  const reopened = await f.controller.openPair({ force: true, forceRoles: ['dag'] });
+  assert.ok(reopened.dag);
+  assert.equal(reopened.workers, undefined);
+  assert.equal(f.calls.filter(call => call[0] === 'run').length, runs + 1);
+  assert.equal(JSON.parse(await readFile(f.controller.paneFile('workers'), 'utf8')).manualClose, true);
+});
+
+for (const role of ['dag', 'workers']) test(`task5 queued forced ${role} recovery yields to a later authenticated q`, { timeout: 7000 }, async t => {
+  const f = await setup(t);
+  await f.controller.start(); await f.controller.openPair();
+  const state = JSON.parse(await readFile(f.controller.roleFile(role), 'utf8'));
+  const splitCount = f.calls.filter(call => call[0] === 'split').length;
+  const release = Promise.withResolvers();
+  const entered = once(f.events, 'recovery-queue-held', { signal: AbortSignal.timeout(3000) });
+  const blocked = f.controller.enqueue(async () => {
+    f.events.emit('recovery-queue-held'); await release.promise;
+  });
+  await entered;
+  const recovering = f.controller.openPair({ force: true, forceRoles: [role] });
+  recovering.catch(() => {});
+  try {
+    const closed = once(f.events, `closed:${state.paneId}`, { signal: AbortSignal.timeout(3000) });
+    assert.equal((await control('close', state, role === 'dag' ? 6001 : 6002)).type, 'closed');
+    await closed;
+  } finally { release.resolve(); }
+  await blocked; await recovering;
+  assert.equal(f.calls.filter(call => call[0] === 'split').length, splitCount);
+  assert.equal(JSON.parse(await readFile(f.controller.paneFile(role), 'utf8')).manualClose, true);
+  await f.controller.openPair({ force: true, forceRoles: [role] });
+  assert.equal(f.calls.filter(call => call[0] === 'split').length, splitCount + 1);
 });
 
 test('workers reopen splits the verified surviving Todo region and places workers before Todo', async t => {
@@ -466,6 +620,65 @@ test('reload verifies the old process, refreshes lifetime offers and never chang
   assert.equal(await readFile(next.roleFile('dag'), 'utf8'), before);
 });
 
+for (const authority of ['no-actor', 'lost-lease', 'foreign-participant'])
+  test(`task33 fixed ${authority} teardown preserves source and retained role files`, async t => {
+    const f = await setup(t);
+    await f.controller.start(); await f.controller.openPair();
+    const paths = [f.controller.stateFile, ...['dag', 'workers'].flatMap(role =>
+      [f.controller.roleFile(role), f.controller.paneFile(role)])];
+    const before = await Promise.all(paths.map(path => readFile(path)));
+    f.controller.managedAvailable = true;
+    let drained = 0;
+    if (authority !== 'no-actor') {
+      const actor = { leaseHeld: authority !== 'lost-lease',
+        snapshot: { participants: { dag: { lifetimeId: authority === 'foreign-participant'
+          ? 'foreign-lifetime' : f.controller.lifetimeId } } },
+        async drain() { drained++; } };
+      f.controller.managedActor = actor;
+      f.controller.coordinator = { actor, binding: f.controller.binding, ownsPublisherClaim: () => true,
+        terminalAuthority: async () => { throw new Error('Unqualified terminal authority reached'); } };
+    }
+    await f.controller.stop();
+    assert.deepEqual(await Promise.all(paths.map(path => readFile(path))), before);
+    assert.equal(drained, 0);
+  });
+
+test('task33 fixed accepted owner publication remains connected to exact participant drain', async t => {
+  const f = await setup(t);
+  await f.controller.start(); await f.controller.openPair();
+  f.controller.managedAvailable = true;
+  let observed = 0, drained = 0;
+  const actor = { leaseHeld: true,
+    snapshot: { ownerNonce: 'logical-current-owner', generation: 1, sessionId: f.controller.sessionId,
+      participants: { dag: { lifetimeId: f.controller.lifetimeId } } },
+    async drain(participant, lifetimeId) {
+      assert.equal(participant, 'dag'); assert.equal(lifetimeId, f.controller.lifetimeId);
+      drained++;
+    } };
+  f.controller.managedActor = actor;
+  // This checks the delegated contract only. W's real actor/terminalAuthority
+  // integration has its own logical positive and the required native case.
+  f.controller.coordinator = { actor, binding: f.controller.binding, ownsPublisherClaim: () => true,
+    terminalAuthority: async (participant, lifetimeId, records) => {
+      assert.equal(participant, 'dag'); assert.equal(lifetimeId, f.controller.lifetimeId);
+      assert.equal(records.length, 2);
+      for (const record of records) {
+        const target = await f.controller.nativeTarget(record);
+        assert.equal(target.paneId, record.paneId);
+        assert.equal(target.viewer.pid, record.processId);
+      }
+      observed++;
+      return true;
+    } };
+  await f.controller.stop();
+  assert.equal(observed, 1); assert.equal(drained, 1);
+  assert.equal(JSON.parse(await readFile(f.controller.stateFile, 'utf8')).connected, false);
+  for (const role of ['dag', 'workers']) {
+    const state = JSON.parse(await readFile(f.controller.roleFile(role), 'utf8'));
+    assert.equal(state.connected, false); assert.equal(state.controlOffer, null); assert.equal(state.presenceOffer, null);
+  }
+});
+
 test('failed initial source save rejects readiness and cannot authorize a fixed pair launch', async t => {
   const f = await setup(t);
   await writeFile(f.controller.directory, 'blocked directory');
@@ -474,4 +687,283 @@ test('failed initial source save rejects readiness and cannot authorize a fixed 
   await assert.rejects(f.controller.stop());
   assert.equal(f.controller.control.listening, false);
   assert.equal(f.calls.filter(call => ['split', 'run'].includes(call[0])).length, 0);
+});
+
+for (const kind of ['absent', 'known', 'busy']) test(`task3 canonical managed slot ${kind} controls standalone admission`, async t => {
+  const f = await setup(t);
+  const stateDir = join(f.directory, 'managed');
+  await mkdir(stateDir);
+  const socketPath = join(f.directory, 'socket');
+  await writeFile(socketPath, '');
+  const canonicalState = stateDir.replaceAll('\\', '/').toLowerCase();
+  const canonicalSocket = socketPath.replaceAll('\\', '/').toLowerCase();
+  const key = createHash('sha256').update(JSON.stringify([canonicalSocket, 'qa:parent'])).digest('hex');
+  const slotDir = join(canonicalState, 'parent-slots', key);
+  let db;
+  if (kind !== 'absent') {
+    await mkdir(slotDir, { recursive: true });
+    if (kind === 'known') await writeFile(join(slotDir, 'slot.json'), '{"schema":"unknown-but-occupied"}');
+    else {
+      db = new DatabaseSync(join(slotDir, 'lease.sqlite'), { timeout: 0 });
+      db.exec('BEGIN EXCLUSIVE');
+    }
+  }
+  try {
+    const result = await fixedController.probeManagedSlot({ stateDir, socketPath, parentPaneId: 'qa:parent' });
+    assert.equal(result.blocked, kind !== 'absent');
+    if (kind === 'busy') assert.equal(result.code, 'SQLITE_BUSY');
+    f.controller.managedStateDir = stateDir;
+    f.controller.binding.socketPath = socketPath;
+    await f.controller.start();
+    if (kind === 'absent') {
+      await f.controller.openPair();
+      assert.equal(f.calls.filter(call => call[0] === 'split').length, 2);
+    } else {
+      await assert.rejects(f.controller.openPair(), /BLOCKED/);
+      assert.equal(f.controller.status, 'BLOCKED');
+      assert.equal(f.calls.filter(call => ['split', 'run', 'close', 'swap', 'resize'].includes(call[0])).length, 0);
+    }
+  } finally { db?.close(); }
+});
+
+test('task3 managed availability remains blocking after the W coordinator disappears', async t => {
+  const f = await setup(t);
+  f.controller.managedAvailable = true;
+  await f.controller.start();
+  await assert.rejects(f.controller.open(), /BLOCKED/);
+  assert.equal(f.controller.status, 'BLOCKED');
+  assert.equal(f.calls.filter(call => ['split', 'run', 'close'].includes(call[0])).length, 0);
+});
+
+test('task20 managed arrange forwards its exact target, arguments and intended geometry to W', async t => {
+  const f = await setup(t);
+  const target = { paneId: 'qa:parent', tabId: 'qa:tab', shell: { pid: 7000, birth: '133800000000000000' } };
+  const args = ['resize', '--pane', target.paneId, '--direction', 'right', '--amount', '.1'];
+  const effect = { paneId: target.paneId, rect: { x: 0, y: 0, width: 60, height: 40 } };
+  const events = new EventEmitter();
+  let finish;
+  const completion = new Promise(resolve => { finish = resolve; });
+  const coordinator = { actor: {}, target: async paneId => {
+    assert.equal(paneId, target.paneId);
+    return target;
+  }, mutate(role, type, observed, submitted, expected) {
+    assert.equal(this, coordinator);
+    assert.equal(role, 'dag');
+    assert.equal(type, 'arrange');
+    assert.equal(observed, target);
+    assert.equal(submitted, args);
+    assert.equal(expected, effect);
+    events.emit('forwarded');
+    return completion;
+  } };
+  f.controller.managedAvailable = true;
+  f.controller.coordinator = coordinator;
+  const forwarded = once(events, 'forwarded', { signal: AbortSignal.timeout(2000) });
+  const result = f.controller.mutate('dag', 'arrange', target.paneId, args, effect);
+  await forwarded;
+  assert.equal(f.calls.filter(call => ['resize', 'layout'].includes(call[0])).length, 0);
+  const receipt = { type: 'pane_resize', resize: { changed: true } };
+  finish(receipt);
+  assert.equal(await result, receipt);
+});
+
+async function placementFixture(t) {
+  const f = await setup(t);
+  await f.controller.start(); await f.controller.openPair();
+  const ids = { parent: 'qa:parent', dag: 'qa:role1', workers: 'qa:role2', todo: 'qa:todo' };
+  const todo = { ...f.controller.binding, role: 'todo', paneId: ids.todo, tabId: 'qa:tab',
+    scopeEpoch: 1, ready: true, manualClose: false };
+  f.panes.set(ids.todo, { pane_id: ids.todo, tab_id: 'qa:tab' });
+  let tree = { direction: 'right', ratio: .6, first: ids.parent, second: {
+    direction: 'right', ratio: .5, first: {
+      direction: 'down', ratio: .5, first: ids.workers, second: ids.todo }, second: ids.dag } };
+  const visit = (node, rect, panes = []) => {
+    if (typeof node === 'string') { panes.push({ pane_id: node, rect }); return panes; }
+    const axis = node.direction === 'right' ? 'width' : 'height';
+    const offset = node.direction === 'right' ? 'x' : 'y';
+    const size = Math.round(rect[axis] * node.ratio);
+    visit(node.first, { ...rect, [axis]: size }, panes);
+    visit(node.second, { ...rect, [offset]: rect[offset] + size, [axis]: rect[axis] - size }, panes);
+    return panes;
+  };
+  const replace = (node, id, change) => typeof node === 'string' ? node === id ? change(node) : node :
+    { ...node, first: replace(node.first, id, change), second: replace(node.second, id, change) };
+  const remove = (node, id) => {
+    if (typeof node === 'string') return node === id ? null : node;
+    const first = remove(node.first, id), second = remove(node.second, id);
+    return first === null ? second : second === null ? first : { ...node, first, second };
+  };
+  const layout = () => ({ workspace_id: 'qa', tab_id: 'qa:tab', area: { x: 0, y: 0, width: 100, height: 40 },
+    focused_pane_id: f.focused, zoomed: false, panes: visit(tree, { x: 0, y: 0, width: 100, height: 40 }) });
+  const targets = new Map(Object.values(ids).map((paneId, index) => [paneId, { paneId, tabId: 'qa:tab',
+    shell: { pid: 8100 + index, birth: '133800000000000000' } }]));
+  let number = 0;
+  const original = f.controller.herdr;
+  const actions = [];
+  f.controller.herdr = async (...args) => {
+    const option = key => args[args.indexOf(key) + 1];
+    if (args[0] === 'layout') return { layout: layout() };
+    if (args[0] === 'list') return { panes: [...f.panes.values()].map(pane => ({ ...pane, focused: pane.pane_id === f.focused })) };
+    if (args[0] === 'move') { actions.push(args); return { type: 'pane_move', move_result: { changed: false, reason: 'same_tab' } }; }
+    if (args[0] === 'split') {
+      actions.push(args);
+      const paneId = 'qa:temp' + ++number;
+      f.panes.set(paneId, { pane_id: paneId, tab_id: 'qa:tab' });
+      targets.set(paneId, { paneId, tabId: 'qa:tab', shell: { pid: 8200 + number, birth: '133800000000000000' } });
+      tree = replace(tree, option('--pane'), id => ({ direction: option('--direction'), ratio: Number(option('--ratio') ?? .5),
+        first: id, second: paneId }));
+      return { pane: { pane_id: paneId } };
+    }
+    if (args[0] === 'swap') {
+      actions.push(args);
+      const a = option('--source-pane'), b = option('--target-pane');
+      tree = replace(replace(replace(tree, a, () => 'temporary-marker'), b, () => a), 'temporary-marker', () => b);
+      f.focused = a; return { type: 'pane_swap', swap: { changed: true, source_pane_id: a, target_pane_id: b, layout: layout() } };
+    }
+    if (args[0] === 'close' && targets.has(args[1])) {
+      actions.push(args); tree = remove(tree, args[1]); f.panes.delete(args[1]); return {};
+    }
+    if (args[0] === 'resize') {
+      actions.push(args);
+      assert.equal(option('--pane'), ids.parent);
+      tree.ratio = Number(tree.ratio) + (option('--direction') === 'left' ? -1 : 1) * Number(option('--amount'));
+      return { type: 'pane_resize', resize: { changed: true, layout: layout() } };
+    }
+    return original(...args);
+  };
+  f.controller.managedAvailable = true;
+  f.controller.claim = { ...f.controller.binding, tabId: 'qa:tab', layout: 'columns' };
+  f.controller.nativeTarget = async record => targets.get(record.paneId);
+  f.controller.restorePlacementFocus = async (_created, selected) => { f.focused = selected; };
+  const actor = { leaseHeld: true, blocked: false, draining: false,
+    snapshot: { ownerNonce: 'owned-nonce', generation: 1, operations: [] } };
+  let afterMutation;
+  f.controller.coordinator = { actor,
+    lifetimeId: 'w-owned', binding: f.controller.binding, inspectTodo: async () => todo,
+    assertCurrent() {},
+    target: async id => {
+      if (!f.panes.has(id)) throw new Error('Unknown native target');
+      return structuredClone(targets.get(id));
+    },
+    mutate: async (_role, type, target, args) => {
+      const result = await f.controller.herdr(...args);
+      await afterMutation?.({ type, target, args, result });
+      return result;
+    } };
+  return { ...f, ids, actions, targets, layout, actor,
+    set afterMutation(value) { afterMutation = value; },
+    addForeign() {
+      const paneId = 'qa:foreign';
+      f.panes.set(paneId, { pane_id: paneId, tab_id: 'qa:tab' });
+      tree = { direction: 'right', ratio: .8, first: tree, second: paneId };
+    } };
+}
+
+test('task22 conditional managed placement uses supported composition and retains live identities', async t => {
+  const f = await placementFixture(t), before = structuredClone([...f.targets]);
+  await f.controller.arrangeDashboard();
+  assert.equal(fixedController.isColumnDashboard(f.layout(), f.ids), true);
+  assert.equal(f.actions.filter(args => args[0] === 'move').length, 0);
+  assert.equal(f.actions.filter(args => args[0] === 'split').length, 3);
+  assert.equal(f.actions.filter(args => args[0] === 'close').length, 3);
+  assert.equal([...f.panes.keys()].some(id => id.startsWith('qa:temp')), false);
+  for (const [id, identity] of before) assert.deepEqual(f.targets.get(id), identity);
+  const journal = JSON.parse(await readFile(join(f.controller.directory, 'placement.json'), 'utf8'));
+  assert.equal(journal.phase, 'COMPLETE');
+  assert.equal(journal.temporary, null);
+  const actions = f.actions.length;
+  await f.controller.arrangeDashboard();
+  assert.equal(f.actions.length, actions);
+});
+
+test('task22 foreign region prevents any managed placement action', async t => {
+  const f = await placementFixture(t);
+  f.addForeign();
+  await assert.rejects(f.controller.arrangeDashboard(), /unowned panes/);
+  assert.equal(f.actions.length, 0);
+});
+
+test('task22 unknown applied split stays journaled and is never replayed', async t => {
+  const f = await placementFixture(t);
+  f.afterMutation = ({ type }) => {
+    if (type === 'split') {
+      f.actor.blocked = true;
+      f.actor.snapshot.operations.push({ id: 'split-unknown', type: 'split', status: 'UNKNOWN' });
+      throw new Error('lost split reply');
+    }
+  };
+  await assert.rejects(f.controller.arrangeDashboard(), /lost split reply/);
+  const journal = JSON.parse(await readFile(join(f.controller.directory, 'placement.json'), 'utf8'));
+  assert.equal(journal.phase, 'BLOCKED');
+  assert.equal(journal.operations[0].status, 'UNKNOWN');
+  assert.equal(journal.beforeLayout.panes.length, 4);
+  assert.equal(journal.failureLayout.panes.length, 5);
+  assert.equal(f.actions.length, 1);
+  await assert.rejects(f.controller.arrangeDashboard(), /unowned panes/);
+  assert.equal(f.actions.length, 1);
+});
+
+test('task22 interrupted settled temporary split closes only its exact empty shell', async t => {
+  const f = await placementFixture(t);
+  const original = f.controller.coordinator.mutate;
+  f.controller.coordinator.mutate = async (...args) => {
+    if (args[1] === 'arrange') throw new Error('placement interrupted before swap');
+    return original(...args);
+  };
+  await assert.rejects(f.controller.arrangeDashboard(), /interrupted before swap/);
+  assert.deepEqual(f.actions.map(args => args[0]), ['split', 'close']);
+  assert.equal([...f.panes.keys()].some(id => id.startsWith('qa:temp')), false);
+  const journal = JSON.parse(await readFile(join(f.controller.directory, 'placement.json'), 'utf8'));
+  assert.equal(journal.phase, 'BLOCKED');
+  assert.equal(journal.cleanup, 'exact-empty-shell-closed');
+  await assert.rejects(f.controller.arrangeDashboard(), /unresolved owned temporary placement/);
+  assert.equal(f.actions.length, 2);
+});
+
+test('task22 changed temporary native identity blocks cleanup and further placement', async t => {
+  const f = await placementFixture(t);
+  const original = f.controller.coordinator.mutate;
+  f.controller.coordinator.mutate = async (...args) => {
+    if (args[1] === 'arrange') {
+      f.targets.get('qa:temp1').shell.birth = '133800000000000001';
+      throw new Error('temporary identity replaced');
+    }
+    return original(...args);
+  };
+  await assert.rejects(f.controller.arrangeDashboard(), /identity replaced/);
+  assert.deepEqual(f.actions.map(args => args[0]), ['split']);
+  const journal = JSON.parse(await readFile(join(f.controller.directory, 'placement.json'), 'utf8'));
+  assert.equal(journal.phase, 'BLOCKED');
+  assert.match(journal.cleanupError.message, /temporary native shell changed/);
+  assert.notEqual(journal.temporary.shell.birth, f.targets.get('qa:temp1').shell.birth);
+  await assert.rejects(f.controller.arrangeDashboard(), /unowned panes/);
+  assert.equal(f.actions.length, 1);
+});
+
+test('task22 a foreign pane appearing after split blocks swap and close', async t => {
+  const f = await placementFixture(t);
+  f.afterMutation = ({ type }) => { if (type === 'split') f.addForeign(); };
+  await assert.rejects(f.controller.arrangeDashboard(), /unowned panes/);
+  assert.deepEqual(f.actions.map(args => args[0]), ['split']);
+  const journal = JSON.parse(await readFile(join(f.controller.directory, 'placement.json'), 'utf8'));
+  assert.equal(journal.phase, 'BLOCKED');
+  assert.equal(journal.failureLayout.panes.length, 6);
+  assert.equal(journal.temporary.paneId, 'qa:temp1');
+});
+
+test('task4 fixed discovery ignores records for another parent or socket', async t => {
+  const f = await setup(t);
+  const own = { ...f.controller.binding, role: 'dag', paneId: 'qa:legacy' };
+  const paths = [join(f.directory, 'old', 'dag.pane.json'), join(f.directory, 'other', 'dag.pane.json')];
+  for (const path of paths) await mkdir(join(path, '..'), { recursive: true });
+  await writeFile(paths[0], JSON.stringify(own));
+  await writeFile(paths[1], JSON.stringify({ ...own, parentPaneId: 'foreign:parent' }));
+  assert.deepEqual((await fixedController.discoverLegacyRecords(f.directory, f.controller.binding)).map(entry => entry.path), [paths[0]]);
+});
+
+test('task4 only a typed authoritative pane_not_found proves an obsolete locator', () => {
+  assert.equal(fixedController.authoritativePaneNotFound({ code: 'pane_not_found' }), true);
+  for (const error of [{ message: 'pane_not_found' }, { message: 'unknown pane' },
+    { code: 'connection_refused' }, { code: 'query_failed', stderr: 'pane_not_found' }])
+    assert.equal(fixedController.authoritativePaneNotFound(error), false);
 });

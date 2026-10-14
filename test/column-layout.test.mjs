@@ -45,6 +45,12 @@ test('owned stacked migration keeps pane identities, preserves input selection a
     coordinator: { inspectTodo: async () => todo }, membership: async () => {}, verify: async () => true,
     placementFocus: async () => selected,
     restorePlacementFocus: async (_created, original) => { selected = original; },
+    mutate: async (role, type, paneId, args) => {
+      assert.equal(role, 'dag');
+      assert.equal(type, 'arrange');
+      assert.ok(Object.values(ids).includes(paneId));
+      return owner.herdr(...args);
+    },
     herdr: async (...args) => {
       if (args[0] === 'layout') return { layout };
       mutations.push(args);
