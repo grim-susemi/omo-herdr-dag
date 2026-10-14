@@ -725,13 +725,13 @@ export class FixedDagPane extends DagPane {
   }
   async replaceRetained(entries = []) {
     for (const retained of entries) {
-      if (retained.state !== 'retained' || retained.record?.sessionId === this.sessionId && !retained.empty) continue;
+      if (retained.state !== 'retained' || retained.record?.sessionId === this.sessionId && !retained.empty && !retained.upgrade) continue;
       const role = retained.record.role;
       if (!['dag', 'workers'].includes(role) || !this.coordinator?.actor)
         throw blocked('retained fixed replacement requires the held coordinator');
       if (typeof this.node === 'function') this.node = await this.node();
       const record = { ...retained.record, ...this.binding, scopeEpoch: this.scopeEpoch,
-        statePath: this.roleFile(role), nodePath: this.node, launchToken: randomBytes(24).toString('hex'),
+        statePath: this.roleFile(role), viewerPath: this.viewer, nodePath: this.node, launchToken: randomBytes(24).toString('hex'),
         prepared: true, ready: false, manualClose: false, layoutClaim: this.claim };
       delete record.processId; delete record.viewerBirth;
       await this.coordinator.retireRetainedRole(retained, () => this.roleWrite(async () => {

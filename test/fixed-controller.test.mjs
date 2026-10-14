@@ -145,7 +145,7 @@ async function setup(t) {
   return { directory, calls, warnings, events, panes, processes, options, controller, controllers,
     get focused() { return focused; }, set focused(value) { focused = value; } };
 }
-for (const [empty, sameSession] of [[false, false], [true, false], [true, true]])
+for (const [empty, sameSession] of [[false, false], [true, false], [true, true], [false, true]])
   test(`task5 retained fixed replacement resolves its executable before launch (${empty ? 'empty' : 'live'}, ${sameSession ? 'resume' : 'fresh'})`, async t => {
   const f = await setup(t);
   await f.controller.start();
@@ -171,11 +171,13 @@ for (const [empty, sameSession] of [[false, false], [true, false], [true, true]]
     }
     return herdr(...args);
   };
-  await f.controller.replaceRetained([{ state: 'retained', empty,
-    record: { ...old, sessionId: sameSession ? f.controller.sessionId : 'prior-conversation' } }]);
+  await f.controller.replaceRetained([{ state: 'retained', empty, upgrade: sameSession && !empty,
+    record: { ...old, viewerPath: join(f.directory, 'generation-000001', 'viewer.mjs'),
+      sessionId: sameSession ? f.controller.sessionId : 'prior-conversation' } }]);
   assert.equal(resolutions, 1);
   const current = JSON.parse(await readFile(f.controller.paneFile('dag'), 'utf8'));
   assert.equal(current.nodePath, f.options.node);
+  assert.equal(current.viewerPath, f.controller.viewer);
   assert.equal(current.paneId, old.paneId);
   assert.notEqual(current.launchToken, old.launchToken);
   assert.equal(f.calls.slice(before).filter(args => args[0] === 'split').length, 0);
