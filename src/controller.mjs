@@ -842,6 +842,18 @@ export class FixedDagPane extends DagPane {
   async ensureRole(role, anchor, direction, ratio, tabId, force, beforePane) {
     if (force()) await this.roleTail;
     let record = await readJson(this.paneFile(role));
+    // Actor tombstones retain their evidence files. Revalidate the held owner's
+    // absence proof before replacing a locator from an obsolete generation.
+    if (this.managedAvailable && record && !record.manualClose &&
+      this.recordMatches({ ...record, viewerPath: this.viewer }, role) && typeof record.nodePath === 'string' &&
+      this.coordinator?.actor?.snapshot.closures.some(entry => entry.role === role && entry.paneId === record.paneId &&
+        entry.sessionId === record.sessionId && entry.reason === 'pane_not_found')) {
+      if (typeof this.node === 'function') this.node = await this.node();
+      if (pathKey(record.viewerPath) !== pathKey(this.viewer) || pathKey(record.nodePath) !== pathKey(this.node)) {
+        await this.coordinator.obsoleteLocator(record);
+        record = null;
+      }
+    }
     if (record && !this.recordMatches(record, role)) {
       if (this.managedAvailable) throw blocked('retained fixed record identity changed');
       return;

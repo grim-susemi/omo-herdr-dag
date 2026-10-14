@@ -961,6 +961,106 @@ test('task4 fixed discovery ignores records for another parent or socket', async
   assert.deepEqual((await fixedController.discoverLegacyRecords(f.directory, f.controller.binding)).map(entry => entry.path), [paths[0]]);
 });
 
+for (const role of ['dag', 'workers'])
+  for (const scenario of ['dead-viewer', 'dead-node', 'live', 'ambiguous-absence',
+    'unreadable-membership', 'owner-unheld', 'reappeared'])
+    test(`upgrade legacy fixed ${role} recovery: ${scenario}`, async t => {
+      const f = await setup(t), owner = f.controller;
+      owner.managedAvailable = true;
+      owner.scopeEpoch = 1;
+      owner.viewer = join(f.directory, 'generation-000004', 'viewer.mjs');
+      const record = { schema: 'omo-herdr-dashboard/pane/1', ...owner.binding, role,
+        paneId: 'qa:legacy', tabId: 'qa:tab', scopeEpoch: 1, launchToken: 'generation-3-launch',
+        statePath: owner.roleFile(role), viewerPath: scenario === 'dead-node' ? owner.viewer :
+          join(f.directory, 'generation-000003', 'viewer.mjs'),
+        nodePath: scenario === 'dead-node' ? 'old-node' : owner.node,
+        prepared: true, ready: true, manualClose: false, processId: 6001 };
+      await writeJson(owner.paneFile(role), record);
+      let live = scenario === 'live', retirementCalls = 0, authority = false;
+      const calls = [], original = owner.herdr;
+      owner.herdr = async (...args) => {
+        calls.push({ args, authority });
+        if (args[0] === 'get') {
+          if (live) return { pane: { pane_id: record.paneId } };
+          throw Object.assign(new Error('legacy pane unavailable'),
+            { code: scenario === 'ambiguous-absence' ? 'transport_error' : 'pane_not_found' });
+        }
+        if (scenario === 'unreadable-membership' && args[0] === 'list') throw new Error('membership unreadable');
+        return original(...args);
+      };
+      const actor = { leaseHeld: true, snapshot: { ownerNonce: 'owner', generation: 1, operations: [], closures: [] } };
+      owner.managedActor = actor;
+      const coordinator = { actor, assertCurrent() {
+        if (!actor.leaseHeld) throw new Error('BLOCKED: managed controller or lease unavailable');
+      }, target: async paneId => ({ paneId, tabId: 'qa:tab', shell: { pid: 7000, birth: 'shell-birth' } }),
+        async obsoleteLocator(locator) {
+          this.assertCurrent();
+          authority = true;
+          try {
+            await owner.membership(owner.parentPane);
+            let missing;
+            try { await owner.herdr('get', locator.paneId); }
+            catch (error) {
+              if (!fixedController.authoritativePaneNotFound(error)) throw error;
+              missing = error;
+            }
+            if (!missing) throw new Error('BLOCKED: CLOSURE_MISMATCH');
+            retirementCalls++;
+            if (!actor.snapshot.closures.some(entry => entry.paneId === locator.paneId))
+              actor.snapshot.closures.push({ role, paneId: locator.paneId, sessionId: locator.sessionId,
+                generation: 1, reason: 'pane_not_found' });
+          } finally { authority = false; }
+        },
+        async reconcileLegacy() {
+          this.assertCurrent();
+          if (live) throw new Error('BLOCKED: legacy executable or viewer source mismatch');
+          await this.obsoleteLocator(record);
+          return [];
+        },
+        async mutate(selectedRole, type, target, args) {
+          this.assertCurrent();
+          authority = true;
+          try { return await owner.herdr(...args); } finally { authority = false; }
+        } };
+      owner.coordinator = coordinator;
+      owner.launchRole = async next => {
+        const ready = { ...next, ready: true, processId: 6002 };
+        owner.records.set(role, ready);
+        await writeJson(owner.paneFile(role), ready);
+        return ready;
+      };
+      if (scenario === 'owner-unheld') actor.leaseHeld = false;
+      if (['live', 'ambiguous-absence', 'unreadable-membership', 'owner-unheld'].includes(scenario)) {
+        await assert.rejects(owner.preflightRecovery(), scenario === 'live' ?
+          /legacy executable or viewer source mismatch/ : scenario === 'ambiguous-absence' ?
+            /legacy pane unavailable/ : scenario === 'unreadable-membership' ?
+              /membership unreadable/ : /managed controller or lease unavailable/);
+      } else {
+        await owner.preflightRecovery();
+        assert.deepEqual(JSON.parse(await readFile(owner.paneFile(role))), record);
+        if (scenario === 'reappeared') {
+          live = true;
+          await assert.rejects(owner.ensureRole(role, owner.parentPane, 'right', '0.5', 'qa:tab', () => true));
+        } else {
+          const current = await owner.ensureRole(role, owner.parentPane, 'right', '0.5', 'qa:tab', () => true);
+          assert.notEqual(current.paneId, record.paneId);
+          assert.equal(current.viewerPath, owner.viewer);
+          assert.equal(current.nodePath, owner.node);
+          assert.notEqual(current.launchToken, record.launchToken);
+          assert.ok(retirementCalls >= 2, 'the delegated actor path must revalidate the tombstone');
+          assert.ok(calls.filter(call => call.args[0] === 'split').every(call => call.authority));
+        }
+      }
+      if (!scenario.startsWith('dead-')) {
+        assert.deepEqual(JSON.parse(await readFile(owner.paneFile(role))), record);
+        assert.equal(calls.filter(call => call.args[0] === 'split').length, 0);
+      }
+      assert.equal(calls.filter(call => call.args[0] === 'close').length, 0);
+      // This fixture checks delegation only; unified managed-layout exercises
+      // the same coordinator call with the real lease-holding actor.
+      owner.coordinator = null; owner.managedActor = null;
+    });
+
 test('task4 only a typed authoritative pane_not_found proves an obsolete locator', () => {
   assert.equal(fixedController.authoritativePaneNotFound({ code: 'pane_not_found' }), true);
   for (const error of [{ message: 'pane_not_found' }, { message: 'unknown pane' },
